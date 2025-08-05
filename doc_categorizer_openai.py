@@ -24,27 +24,27 @@ client = openai.OpenAI(api_key=api_key)
 CATEGORY_KEYWORDS = {
     "Claim Form": [
         "Name of the Insurance Company", "Address of the Policy issuing Office", "TPA ID", "Policy No.",
-    "Name of the Insured Person", "Name of policy owner", "Relationship to the Insured", "Patient Age",
-    "Occupation", "Phone Number", "Mobile Number", "Residential address",
-    "email ID", "Bank Name", "Account Holder Name", "Branch Name",
-    "IFSC Code", "Account Number", "Account Type", "Bank Address",
-    "Name of the Disease/ Illness contracted of injury suffered", "Date of Injury sustained or Disease/ Illness first detected",
-    "Name of the Hospital/ Nursing Home/ Clinic", "Address of the Hospital/ Nursing Home/ Clinic",
-    "Date of Admission", "Time of admission", "Date of Discharge", "Time of Discharge",
-    "Name of attending Medical Practitioner", "Address of attending Medical Practitioner", "Qualification", "Telephone",
-    "Mobile Number", "Registration No", "Past Insurance", "Date of Policy commencement",
-    "If claim for Domically Hospitalization", "Date of Commencement of treatment", "date of Completion of Treatment",
-    "Name of attending Medical Practitioner", "Address of attending Medical Practitioner", "Total Amount Claimed",
+        "Name of the Insured Person", "Name of policy owner", "Relationship to the Insured", "Patient Age",
+        "Occupation", "Phone Number", "Mobile Number", "Residential address",
+        "email ID", "Bank Name", "Account Holder Name", "Branch Name",
+        "IFSC Code", "Account Number", "Account Type", "Bank Address",
+        "Name of the Disease/ Illness contracted of injury suffered", "Date of Injury sustained or Disease/ Illness first detected",
+        "Name of the Hospital/ Nursing Home/ Clinic", "Address of the Hospital/ Nursing Home/ Clinic",
+        "Date of Admission", "Time of admission", "Date of Discharge", "Time of Discharge",
+        "Name of attending Medical Practitioner", "Address of attending Medical Practitioner", "Qualification", "Telephone",
+        "Mobile Number", "Registration No", "Past Insurance", "Date of Policy commencement",
+        "If claim for Domically Hospitalization", "Date of Commencement of treatment", "date of Completion of Treatment",
+        "Name of attending Medical Practitioner", "Address of attending Medical Practitioner", "Total Amount Claimed",
     ],
     "Discharge Summary": [
-            "Patient Name", "Age", "Sex", "W/o",
-    "UHId", "IPD No", "Room No.", "Bed No.",
-    "Address", "Contact", "Consultant", "MRD No",
-    "Admission Type", "Admission Date", "Admission Time", "Discharge Date",
-    "Discharge Time", "Date of Surgery", "Chief Complaints", "Reason for admission",
-    "In Examinations", "Diagnosis", "Nature of admission", "Past History",
-    "Procedure", "Investigations", "Treatment given in Hospital", "Diet",
-    "Condition on Discharge", "Discharge Note", "Follow up Note",
+        "Patient Name", "Age", "Sex", "W/o",
+        "UHId", "IPD No", "Room No.", "Bed No.",
+        "Address", "Contact", "Consultant", "MRD No",
+        "Admission Type", "Admission Date", "Admission Time", "Discharge Date",
+        "Discharge Time", "Date of Surgery", "Chief Complaints", "Reason for admission",
+        "In Examinations", "Diagnosis", "Nature of admission", "Past History",
+        "Procedure", "Investigations", "Treatment given in Hospital", "Diet",
+        "Condition on Discharge", "Discharge Note", "Follow up Note",
     ],
     "Report": [
         "lab results", "diagnostic report", "imaging report", "test results",
@@ -66,14 +66,56 @@ CATEGORY_KEYWORDS = {
         "Discharge Time", "Policy No", "Claim No", "Pan Number",
         "ID Card", "Prepared by", "Contact number-1", "Contact number-2",
         "Contact number-3", "Contact number-4", "Contact number-5", "email id",
-        "website","Bill Number", "Patient Name",
-        "Address","Item Code", "Bill Category", "Bill Description", "Service Provider",
+        "website", "Bill Number", "Patient Name",
+        "Address", "Item Code", "Bill Category", "Bill Description", "Service Provider",
         "Charge Start Date", "Charge Start Time", "Charge End Date", "Charge End Time",
         "Manufacturer", "Batch No", "Expiry Date", "Quantity",
         "Rate", "Amount", "SGST", "CTST",
         "TAX", "GSTN"
     ]
 }
+
+
+def convert_tiff_to_pdf(tiff_file_bytes: bytes) -> bytes:
+    """Convert TIFF file to PDF."""
+    try:
+        # Open TIFF image from bytes
+        image = Image.open(io.BytesIO(tiff_file_bytes))
+
+        # Create a PDF in memory
+        pdf_buffer = io.BytesIO()
+
+        # Handle multi-page TIFF files
+        images = []
+        try:
+            page_count = 0
+            while True:
+                # Convert image to RGB if it's not already
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                images.append(image.copy())
+                page_count += 1
+                image.seek(page_count)
+        except EOFError:
+            # End of pages reached
+            pass
+
+        if images:
+            # Save all images as a single PDF
+            images[0].save(
+                pdf_buffer,
+                format='PDF',
+                save_all=True,
+                append_images=images[1:] if len(images) > 1 else []
+            )
+            pdf_buffer.seek(0)
+            return pdf_buffer.getvalue()
+        else:
+            raise Exception("No valid images found in TIFF file")
+
+    except Exception as e:
+        raise Exception(f"Error converting TIFF to PDF: {str(e)}")
+
 
 def extract_text_from_pdf(pdf_file, max_pages=3):
     """Extract text from a PDF file, handling both text-based and scanned/image-based PDFs."""
@@ -82,7 +124,7 @@ def extract_text_from_pdf(pdf_file, max_pages=3):
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         text = ""
         num_pages = min(max_pages, len(pdf_reader.pages))
-        
+
         for page_num in range(num_pages):
             page = pdf_reader.pages[page_num]
             extracted = page.extract_text()
@@ -91,10 +133,11 @@ def extract_text_from_pdf(pdf_file, max_pages=3):
             else:
                 # If no text is extracted, assume it's a scanned/image-based PDF
                 text += extract_text_from_scanned_pdf(pdf_file, page_num)
-                
+
         return text if text.strip() else "No text could be extracted from the PDF."
     except Exception as e:
         return f"Error extracting text: {str(e)}"
+
 
 def extract_text_from_scanned_pdf(pdf_file, page_num):
     """Extract text from a specific page of a scanned/image-based PDF using OCR."""
@@ -102,35 +145,69 @@ def extract_text_from_scanned_pdf(pdf_file, page_num):
         # Reset file pointer to read from start
         pdf_file.seek(0)
         # Convert PDF page to image
-        images = convert_from_bytes(pdf_file.read(), first_page=page_num+1, last_page=page_num+1)
+        images = convert_from_bytes(
+            pdf_file.read(), first_page=page_num+1, last_page=page_num+1)
         if not images:
             return ""
-        
+
         # Extract text using OCR
         text = pytesseract.image_to_string(images[0], lang='eng')
         return text + "\n\n"
     except Exception as e:
         return f"Error during OCR extraction: {str(e)}"
 
+
+def extract_text_from_tiff(tiff_file_bytes: bytes, max_pages=3) -> str:
+    """Extract text from TIFF file using OCR."""
+    try:
+        # Open TIFF image from bytes
+        image = Image.open(io.BytesIO(tiff_file_bytes))
+
+        text = ""
+        page_count = 0
+
+        try:
+            while page_count < max_pages:
+                # Extract text using OCR from current page
+                page_text = pytesseract.image_to_string(image, lang='eng')
+                if page_text and page_text.strip():
+                    text += page_text + "\n\n"
+
+                page_count += 1
+                try:
+                    image.seek(page_count)
+                except EOFError:
+                    # End of pages reached
+                    break
+        except EOFError:
+            # Single page TIFF or end of pages
+            pass
+
+        return text if text.strip() else "No text could be extracted from the TIFF file."
+    except Exception as e:
+        return f"Error extracting text from TIFF: {str(e)}"
+
+
 def check_keywords(text):
     """Check for category-specific keywords in the text and return the most likely category."""
     text_lower = text.lower()
     category_scores = {category: 0 for category in CATEGORY_KEYWORDS}
-    
+
     # Count keyword matches for each category
     for category, keywords in CATEGORY_KEYWORDS.items():
         for keyword in keywords:
             if re.search(r'\b' + re.escape(keyword.lower()) + r'\b', text_lower):
                 category_scores[category] += 1
-    
+
     # Find the category with the most matches
     max_score = max(category_scores.values())
     if max_score >= 2:  # Require at least 2 keyword matches to assign a category
         for category, score in category_scores.items():
             if score == max_score:
                 return category
-    
+
     return None  # Return None if no category has enough matches
+
 
 def categorize_document(text):
     """Categorize the document based on keywords and OpenAI's API."""
@@ -138,7 +215,7 @@ def categorize_document(text):
     keyword_category = check_keywords(text)
     if keyword_category:
         return keyword_category
-    
+
     # Fallback to LLM if keyword check is inconclusive
     prompt = f"""You are an expert in document classification. 
     Based on the text content below (extracted from a PDF document, possibly using OCR from scanned or image-based PDFs), 
@@ -157,7 +234,7 @@ def categorize_document(text):
     Document content:
     {text[:4000]}  # Limiting text to avoid token limits
     """
-    
+
     try:
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",  # Using GPT-3.5 Turbo
@@ -168,16 +245,41 @@ def categorize_document(text):
             ]
         )
         category = response.choices[0].message.content.strip()
-        
+
         # Ensure the response is one of the five categories
-        valid_categories = ["Claim Form", "Discharge Summary", "Report", "Hospital Bill", "Others"]
+        valid_categories = ["Claim Form", "Discharge Summary",
+                            "Report", "Hospital Bill", "Others"]
         for valid_cat in valid_categories:
             if valid_cat.lower() in category.lower():
                 return valid_cat
-                
+
         return "Others"  # Default to Others if no valid category is matched
     except Exception as e:
         return f"Error during categorization: {str(e)}"
+
+
+def process_file(uploaded_file):
+    """Process uploaded file based on its type."""
+    file_extension = uploaded_file.name.lower().split('.')[-1]
+
+    if file_extension == 'pdf':
+        # Process PDF directly
+        uploaded_file.seek(0)
+        extracted_text = extract_text_from_pdf(uploaded_file)
+        return extracted_text, "PDF"
+
+    elif file_extension in ['tiff', 'tif']:
+        # Convert TIFF to PDF and then process
+        uploaded_file.seek(0)
+        tiff_bytes = uploaded_file.read()
+
+        # First, try direct OCR on TIFF for better quality
+        extracted_text = extract_text_from_tiff(tiff_bytes)
+        return extracted_text, "TIFF"
+
+    else:
+        return f"Unsupported file format: {file_extension}", "Unknown"
+
 
 def main():
     st.set_page_config(
@@ -185,48 +287,53 @@ def main():
         page_icon="📄",
         layout="centered"
     )
-    
+
     st.title("📄 Document Categorization")
-    st.subheader("Automatically categorize your PDF documents")
-    
+    st.subheader("Automatically categorize your PDF and TIFF documents")
+
     st.write("""
-    This application analyzes PDF documents (including scanned or image-based PDFs) and classifies them into one of the following categories:
+    This application analyzes PDF and TIFF documents (including scanned or image-based files) and classifies them into one of the following categories:
     - Claim Form
     - Discharge Summary
     - Report
     - Hospital Bill
     - Others
     """)
-    
-    uploaded_file = st.file_uploader("Upload your PDF document", type=["pdf"])
-    
+
+    uploaded_file = st.file_uploader(
+        "Upload your document",
+        type=["pdf", "tiff", "tif"],
+        help="Supported formats: PDF, TIFF, TIF"
+    )
+
     if uploaded_file is not None:
         # Display file details
         file_details = {
             "Filename": uploaded_file.name,
-            "File size": f"{uploaded_file.size / 1024:.2f} KB"
+            "File size": f"{uploaded_file.size / 1024:.2f} KB",
+            "File type": uploaded_file.name.lower().split('.')[-1].upper()
         }
         st.write("**File Details:**")
         for key, value in file_details.items():
             st.write(f"- {key}: {value}")
-        
+
         with st.spinner("Processing document..."):
-            # Reset file pointer and extract text
-            uploaded_file.seek(0)
-            extracted_text = extract_text_from_pdf(uploaded_file)
-            
-            if extracted_text.startswith("Error"):
+            # Process the file based on its type
+            extracted_text, file_type = process_file(uploaded_file)
+
+            if extracted_text.startswith("Error") or extracted_text.startswith("Unsupported"):
                 st.error(extracted_text)
-            elif extracted_text == "No text could be extracted from the PDF.":
+            elif "No text could be extracted" in extracted_text:
                 st.error(extracted_text)
             else:
                 # Text extraction successful, now categorize
                 with st.spinner("Categorizing document..."):
                     category = categorize_document(extracted_text)
-                
+
                 # Display results with nice formatting
-                st.success("Document processed successfully!")
-                
+                st.success(
+                    f"Document processed successfully! (Processed as {file_type})")
+
                 st.subheader("Document Category")
                 category_color = {
                     "Claim Form": "#FF9933",
@@ -235,7 +342,7 @@ def main():
                     "Hospital Bill": "#CC33FF",
                     "Others": "#666666"
                 }
-                
+
                 # Use a fancy display for the category
                 if category in category_color:
                     st.markdown(
@@ -258,10 +365,15 @@ def main():
                     )
                 else:
                     st.write(category)
-                
+
                 # Add option to see extracted text
                 with st.expander("View extracted text"):
-                    st.text_area("Text from first 3 pages", extracted_text, height=300)
+                    st.text_area(
+                        f"Text extracted from {file_type} (first 3 pages)",
+                        extracted_text,
+                        height=300
+                    )
+
 
 if __name__ == "__main__":
     main()
