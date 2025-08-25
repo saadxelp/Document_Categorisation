@@ -653,19 +653,19 @@ def main():
     st.title("📄 Document Categorization")
     st.subheader("Automatically categorize your PDF and TIFF documents")
 
-    st.write("""
-    This application analyzes PDF and TIFF documents (including scanned or image-based files) and classifies them into one of the following categories:
-    - Claim Form
-    - Discharge Summary
-    - Reports
-    - Cancelled cheque
-    - Hospital Bills
-    - Pharmacy Bills
-    - Diagnostic Bills
-    - KYC
-    - Pre-Auth form C
-    - Others
-    """)
+    # st.write("""
+    # This application analyzes PDF and TIFF documents (including scanned or image-based files) and classifies them into one of the following categories:
+    # - Claim Form
+    # - Discharge Summary
+    # - Reports
+    # - Cancelled cheque
+    # - Hospital Bills
+    # - Pharmacy Bills
+    # - Diagnostic Bills
+    # - KYC
+    # - Pre-Auth form C
+    # - Others
+    # """)
 
     # Display file type and extension mapping
     st.markdown("**File Type and Extension Mapping:**")
