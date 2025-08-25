@@ -103,7 +103,17 @@ CATEGORY_KEYWORDS = {
         "Name_Of_Biller", "Address_Of_Biller", "Address_Lines", "City", "State", "Pincode", "Bill_Date", "Bill_No", "Bill_Line_Items", "Name_Of_Test", "Price", "Is_Nme", "Total_Discount", "Total_Amount_Paid"
     ],
     "KYC": [
-        "Proof_Type", "Name", "Date_Of_Birth", "Is_Id_Proof", "Is_Address_Proof"
+        "Proof_Type", "Name", "Date_Of_Birth", "Is_Id_Proof", "Is_Address_Proof", 
+        "KYC", "Know Your Customer", "Customer Information", "Identity Proof", "Address Proof", 
+        "PAN", "Aadhaar", "Passport", "Voter ID", "Driving License", "CERSAI", "Central KYC Registry", 
+        "Application Form", "Customer Details", "Personal Details", "Identity and Address", 
+        "Current Address", "Permanent Address", "Photograph", "Signature", "Date of Birth",
+        "Mother Name", "Father Name", "Gender", "Marital Status", "Nationality", "Occupation",
+        "Form 60", "Form 61", "E-KYC", "Biometric", "Video KYC", "Digital KYC", "KYC Verification",
+        "KYC Compliance", "KYC Documents", "KYC Process", "KYC Update", "KYC Registration",
+        "Applicant", "Applicant Details", "Customer ID", "Account Type", "Account Number",
+        "IFSC Code", "MICR Code", "Branch Name", "Branch Code", "Bank Name", "Bank Account",
+        "Residential Status", "Correspondence Address", "Proof of Identity", "Proof of Address"
     ],
     "Pre-Auth form C": [
         "Family_Physician", "Exists", "Name", "Insured_Card_Id_Number", "Policy_Number_Or_Name_Of_Corporate", "Employee_Id", "Contact_No", "Present_Illness", "Duration_Of_Present_Ailment", "Date_Of_First_Consultation", "Provisional_Diagnosis", "Proposed_Line_Of_Treatment", "Name_Of_Surgery_If_Yes", "Date_Of_Admission", "Room_Type", "Per_Day_Room_Nursing_Diet_Charges", "Expected_Cost_Diagnostics_Investigation", "Icu_Charges", "Ot_Charges", "Surgeon_Anaesthetist_Consultation_Charges", "Medicine_Consumables_Implant_Charges", "Other_Hospital_Expenses", "All_Inclusive_Package_Charges", "Total_Expected_Cost", "Past_History_Of_Chronic_Illnesses", "Diabetes", "Hypertension", "Heart_Disease", "Hyperlipidemia", "Osteoarthritis", "Asthma_Copd_Bronchitis", "Cancer", "Alcohol_Drug_Abuse", "Any_Hiv_Or_Std_Related_Ailments", "Treating_Dr_Name", "Qualification", "Registration_No", "Patient_Contact_No", "Patient_Alternate_Contact_No", "Patient_Email_Id", "Patient_Alternate_Email_Id", "hypertension", "registration_no", "any_other_ailments",
@@ -286,6 +296,11 @@ def preprocess_text_for_header_detection(text):
     text = text.replace('CERT1FICATE', 'CERTIFICATE')
     text = text.replace('CERTlFICATE', 'CERTIFICATE')
     text = text.replace('CERTIF1CATE', 'CERTIFICATE')
+    text = text.replace('REOUEST', 'REQUEST')  # Common OCR error
+    text = text.replace('H0SPITALIZATION', 'HOSPITALIZATION')  # Common OCR error
+    text = text.replace('H0SPlTALIZATION', 'HOSPITALIZATION')  # Common OCR error
+    text = text.replace('HOSPlTALIZATION', 'HOSPITALIZATION')  # Common OCR error
+    text = text.replace('CASH LESS', 'CASHLESS')  # Normalize cashless
     
     # Fix spacing around common header terms
     text = re.sub(r'DIS\s*CHARGE\s*SUM\s*MARY', 'DISCHARGE SUMMARY', text, flags=re.IGNORECASE)
@@ -310,6 +325,19 @@ def preprocess_text_for_header_detection(text):
     text = re.sub(r'PRE[\s\-]*AUTH\s*ORIZATION', 'PRE-AUTHORIZATION', text, flags=re.IGNORECASE)
     text = re.sub(r'APP\s*ROVAL\s*CERT\s*IFICATE', 'APPROVAL CERTIFICATE', text, flags=re.IGNORECASE)
     text = re.sub(r'AUTH\s*ORIZATION\s*CERT\s*IFICATE', 'AUTHORIZATION CERTIFICATE', text, flags=re.IGNORECASE)
+    text = re.sub(r'RE\s*QUEST\s*FOR\s*CASH\s*LESS', 'REQUEST FOR CASHLESS', text, flags=re.IGNORECASE)
+    text = re.sub(r'CASH\s*LESS\s*HOSPITAL', 'CASHLESS HOSPITAL', text, flags=re.IGNORECASE)
+    text = re.sub(r'TO\s*BE\s*FILLED\s*BY\s*INSURED', 'TO BE FILLED BY INSURED', text, flags=re.IGNORECASE)
+    
+    # Fix spacing around KYC terms
+    text = re.sub(r'CEN\s*TRAL\s*KYC\s*REG\s*ISTRY', 'CENTRAL KYC REGISTRY', text, flags=re.IGNORECASE)
+    text = re.sub(r'KN\s*OW\s*YO\s*UR\s*CUS\s*TOMER', 'KNOW YOUR CUSTOMER', text, flags=re.IGNORECASE)
+    text = re.sub(r'KYC\s*APP\s*LICATION\s*FORM', 'KYC APPLICATION FORM', text, flags=re.IGNORECASE)
+    text = re.sub(r'PER\s*SONAL\s*DE\s*TAILS', 'PERSONAL DETAILS', text, flags=re.IGNORECASE)
+    text = re.sub(r'ID\s*ENTITY\s*AND\s*ADD\s*RESS', 'IDENTITY AND ADDRESS', text, flags=re.IGNORECASE)
+    text = re.sub(r'CURR\s*ENT\s*ADD\s*RESS\s*DE\s*TAILS', 'CURRENT ADDRESS DETAILS', text, flags=re.IGNORECASE)
+    text = re.sub(r'E[\s\-]*KYC\s*AUTH\s*ENTICATION', 'E-KYC AUTHENTICATION', text, flags=re.IGNORECASE)
+    text = re.sub(r'CER\s*SAI', 'CERSAI', text, flags=re.IGNORECASE)
     
     return text
 
@@ -343,8 +371,13 @@ def check_keywords(text):
         category_scores["Discharge Summary"] += 10
         return "Discharge Summary"  # Immediate return for explicit discharge summary header
     
+    # Check for explicit KYC indicators - highest priority
+    if re.search(r'\bcentral\s*kyc\s*registry\b', header, re.IGNORECASE) or re.search(r'\bcersai\b', header, re.IGNORECASE) or re.search(r'\bkyc\s*application\s*form\b', header, re.IGNORECASE) or re.search(r'\bknow\s*your\s*customer\b', header, re.IGNORECASE):
+        category_scores["KYC"] += 10
+        return "KYC"  # Immediate return for explicit KYC header
+    
     # Check for explicit pre-authorization indicators - high priority
-    if re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE):
+    if re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE) or re.search(r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b', header, re.IGNORECASE):
         # IMPORTANT: Check if it also has explicit claim form indicators
         if re.search(r'\bclaim\s*form\b', text_lower, re.IGNORECASE):
             category_scores["Claim Form"] += 10
@@ -359,7 +392,10 @@ def check_keywords(text):
     
     # Check for explicit hospital bill indicators in header - high priority
     if "final bill" in header or re.search(r'\bhospital.*bill\b', header, re.IGNORECASE) or re.search(r'\bfinal.*bill\b', header, re.IGNORECASE):
-        category_scores["Hospital Bills"] += 8
+        # Make sure it's not a pre-auth form with "hospital" in the header
+        if not (re.search(r'\brequest\s*for\s*cashless\s*hospitali[sz]ation\b', header, re.IGNORECASE) or 
+                re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE)):
+            category_scores["Hospital Bills"] += 8
         # Don't return immediately, continue checking other indicators
     
     # Check for explicit pharmacy mentions in header - high priority
@@ -429,9 +465,10 @@ def check_keywords(text):
         category_scores["Pre-Auth form C"] -= 2  # Reduce pre-auth score
     
     # Pre-auth specific terms indicating future treatment
-    if re.search(r'\b(proposed|planned|estimated|expected|upcoming|scheduled)\s*(treatment|procedure|hospitalization|surgery)\b', text_lower):
-        category_scores["Pre-Auth form C"] += 3
+    if re.search(r'\b(proposed|planned|estimated|expected|upcoming|scheduled)\s*(treatment|procedure|hospitalization|surgery)\b', text_lower) or re.search(r'\bto\s*be\s*filled\s*by\s*insured\s*patient\b', text_lower):
+        category_scores["Pre-Auth form C"] += 5  # Increased score
         category_scores["Claim Form"] -= 2  # Reduce claim form score
+        category_scores["Hospital Bills"] -= 3  # Reduce hospital bill score
     
     # Add specific pattern detection for pre-authorization forms
     preauth_patterns = [
@@ -439,7 +476,10 @@ def check_keywords(text):
         r'\bpre[\s\-]*auth\b',
         r'\bpre[\s\-]*authorization\b',
         r'\bauthorization\s*certificate\b',
-        r'\bapproval\s*certificate\b'
+        r'\bapproval\s*certificate\b',
+        r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b',
+        r'\bdetails\s*of\s*the\s*third\s*party\s*administrator\b',
+        r'\bto\s*be\s*filled\s*by\s*insured\s*patient\b'
     ]
     
     preauth_matches = sum(1 for pattern in preauth_patterns if re.search(pattern, text_lower))
@@ -449,8 +489,39 @@ def check_keywords(text):
     # Check for specific pre-authorization content
     if (re.search(r'\bestimated\s*expenses\b', text_lower) or 
         re.search(r'\bproposed\s*treatment\b', text_lower) or 
-        re.search(r'\bauthorized\s*limit\b', text_lower)) and not re.search(r'\bfinal\s*bill\b', text_lower):
-        category_scores["Pre-Auth form C"] += 4
+        re.search(r'\bauthorized\s*limit\b', text_lower) or
+        re.search(r'\binsured\s*card\s*id\s*number\b', text_lower) or
+        re.search(r'\bpolicy\s*number\s*or\s*name\s*of\s*corporate\b', text_lower) or
+        re.search(r'\bfamily\s*physician\b', text_lower)) and not re.search(r'\bfinal\s*bill\b', text_lower):
+        category_scores["Pre-Auth form C"] += 6  # Increased score
+        category_scores["Hospital Bills"] -= 4  # Reduce hospital bill score
+        
+    # Check for KYC document patterns
+    kyc_patterns = [
+        r'\bcentral\s*kyc\s*registry\b',
+        r'\bcersai\b',
+        r'\bkyc\s*application\s*form\b',
+        r'\bknow\s*your\s*customer\b',
+        r'\bpersonal\s*details\b',
+        r'\bidentity\s*and\s*address\b',
+        r'\bcurrent\s*address\s*details\b',
+        r'\bproof\s*of\s*identity\b',
+        r'\bproof\s*of\s*address\b',
+        r'\be[\s\-]*kyc\s*authentication\b',
+        r'\bvideo\s*kyc\b',
+        r'\bphoto\b'
+    ]
+    
+    kyc_matches = sum(1 for pattern in kyc_patterns if re.search(pattern, text_lower))
+    if kyc_matches >= 1:
+        category_scores["KYC"] += 8  # High priority for KYC documents
+        
+    # Check for specific KYC content
+    if (re.search(r'\bapplication\s*form\b', text_lower) and 
+        (re.search(r'\bkyc\b', text_lower) or re.search(r'\bcustomer\b', text_lower))) or (
+        re.search(r'\bpersonal\s*details\b', text_lower) and 
+        re.search(r'\baddress\s*details\b', text_lower)):
+        category_scores["KYC"] += 6
     
     # Look for specific discharge summary patterns
     discharge_patterns = [
@@ -495,7 +566,11 @@ def check_keywords(text):
     # Check for hospital-specific service items
     hospital_service_count = len(re.findall(r'\b(bed charges|room charges|doctor consultancy|pathological investigation|cardiological investigation|icu charges|operation theatre|surgery|procedure|admission|discharge)\b', text_lower))
     if hospital_service_count >= 2:
-        category_scores["Hospital Bills"] += 5
+        # Make sure it's not a pre-auth form with estimated charges
+        if not (re.search(r'\brequest\s*for\s*cashless\b', text_lower) or 
+                re.search(r'\bto\s*be\s*filled\s*by\s*insured\b', text_lower) or
+                re.search(r'\bpre[\s\-]*auth\b', text_lower)):
+            category_scores["Hospital Bills"] += 5
         
     # Special patterns for cancelled cheques
     if re.search(r'\b(ifsc|micr)\b.*?code', text_lower) or re.search(r'\baccount\b.*?\bnumber\b', text_lower):
@@ -588,6 +663,7 @@ def categorize_document(text):
     - Pharmacy Bills: Look for medication names, drug names, tablets, capsules, syrups, injections, prescriptions, dosage information, pharmacy/chemist/medical store names
     - Diagnostic Bills: Look for charges for specific diagnostic tests
     - Pre-Auth form C: Look for pre-approval certificate, authorization, estimated expenses, proposed treatment, authorized limit. These are issued BEFORE treatment and are NOT bills.
+    - KYC: Look for Central KYC Registry, CERSAI, KYC application forms, personal details sections, identity and address proof sections, customer details forms, passport/PAN/Aadhaar references, and photograph sections.
     
     If the document does not clearly match any of the specific categories, classify it as 'Others'.
     Respond with ONLY ONE of these category names as your answer.
@@ -601,7 +677,7 @@ def categorize_document(text):
             model="gpt-3.5-turbo",  # Using GPT-3.5 Turbo
             temperature=0,
             messages=[
-                {"role": "system", "content": "You analyze document text (which may be noisy from OCR) and classify it into exactly one of these categories: 'Claim Form', 'Discharge Summary', 'Reports', 'Cancelled cheque', 'Hospital Bills', 'Pharmacy Bills', 'Diagnostic Bills', 'KYC', 'Pre-Auth form C', or 'Others'. IMPORTANT: If the document contains 'CLAIM FORM' in the header or title, it MUST be classified as 'Claim Form'. IMPORTANT: If the document contains 'CLAIM NO' or 'CLAIM NUMBER', it MUST be classified as 'Claim Form'. Claim Forms typically include policy details, patient information, insurance details, TPA ID, and fields for reimbursement. If the document contains 'DISCHARGE SUMMARY' in the header or title, it MUST be classified as 'Discharge Summary'. Discharge summaries typically include patient details, admission date, discharge date, diagnosis, treatment details, and follow-up notes. If the document contains 'FINAL BILL' or mentions a hospital name with billing information, it should be classified as 'Hospital Bills'. Hospital bills often include services like bed charges, room charges, doctor consultancy, pathological investigation, etc. If the document contains 'PRE-APPROVAL CERTIFICATE', 'PRE-AUTH', 'PRE-AUTHORIZATION' or similar terms in the header, it should be classified as 'Pre-Auth form C' UNLESS it also contains 'CLAIM FORM' or 'CLAIM NO' or 'CLAIM NUMBER', in which case it should be classified as 'Claim Form'. Pre-Auth forms typically include estimated expenses, proposed treatment, authorized limit, and are issued before hospitalization. Only classify as 'Pharmacy Bills' if the document is specifically from a pharmacy/medical store/chemist AND primarily lists medications. Laboratory test reports showing test results with reference ranges and units (like mg/dL) should be classified as 'Reports', not as bills, even if they come from a diagnostic center or hospital laboratory. Pay special attention to bank documents - if you see bank account numbers, IFSC codes, MICR codes, or any indication of a cancelled cheque (which is a bank cheque with 'CANCELLED' written on it, used for verification of bank details), classify it as 'Cancelled cheque'. If the document does not clearly match the specific categories, return 'Others'. Respond with only the category name."},
+                {"role": "system", "content": "You analyze document text (which may be noisy from OCR) and classify it into exactly one of these categories: 'Claim Form', 'Discharge Summary', 'Reports', 'Cancelled cheque', 'Hospital Bills', 'Pharmacy Bills', 'Diagnostic Bills', 'KYC', 'Pre-Auth form C', or 'Others'. IMPORTANT: If the document contains 'CLAIM FORM' in the header or title, it MUST be classified as 'Claim Form'. IMPORTANT: If the document contains 'CLAIM NO' or 'CLAIM NUMBER', it MUST be classified as 'Claim Form'. Claim Forms typically include policy details, patient information, insurance details, TPA ID, and fields for reimbursement. If the document contains 'DISCHARGE SUMMARY' in the header or title, it MUST be classified as 'Discharge Summary'. Discharge summaries typically include patient details, admission date, discharge date, diagnosis, treatment details, and follow-up notes. If the document contains 'CENTRAL KYC REGISTRY', 'CERSAI', 'KYC APPLICATION FORM', or 'KNOW YOUR CUSTOMER' in the header or title, it MUST be classified as 'KYC'. KYC documents typically contain personal details, identity and address sections, customer information, and often have fields for photograph and signature. If the document contains 'FINAL BILL' or mentions a hospital name with billing information, it should be classified as 'Hospital Bills'. Hospital bills often include services like bed charges, room charges, doctor consultancy, pathological investigation, etc. If the document contains 'PRE-APPROVAL CERTIFICATE', 'PRE-AUTH', 'PRE-AUTHORIZATION' or similar terms in the header, it should be classified as 'Pre-Auth form C' UNLESS it also contains 'CLAIM FORM' or 'CLAIM NO' or 'CLAIM NUMBER', in which case it should be classified as 'Claim Form'. Pre-Auth forms typically include estimated expenses, proposed treatment, authorized limit, and are issued before hospitalization. Only classify as 'Pharmacy Bills' if the document is specifically from a pharmacy/medical store/chemist AND primarily lists medications. Laboratory test reports showing test results with reference ranges and units (like mg/dL) should be classified as 'Reports', not as bills, even if they come from a diagnostic center or hospital laboratory. Pay special attention to bank documents - if you see bank account numbers, IFSC codes, MICR codes, or any indication of a cancelled cheque (which is a bank cheque with 'CANCELLED' written on it, used for verification of bank details), classify it as 'Cancelled cheque'. If the document does not clearly match the specific categories, return 'Others'. Respond with only the category name."},
                 {"role": "user", "content": prompt}
             ]
         )
