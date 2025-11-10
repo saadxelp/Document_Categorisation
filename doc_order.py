@@ -81,7 +81,13 @@ CATEGORY_KEYWORDS = {
     "Cancelled cheque": [
         "Payee_Name", "A_C_Number", "Bank_Name", "Ifsc", "Micr", "Branch_Name", "Cheque_Number",
         "Payee Name", "A/C Number", "Account Number", "Bank Name", "IFSC", "MICR", "Branch Name", 
-        "Cheque Number", "Cancelled Cheque", "Account Holder", "Bank", "Branch", "IFSC Code"
+        "Cheque Number", "Cancelled Cheque", "Account Holder", "Bank", "Branch", "IFSC Code",
+        "Cancelled", "CANCELLED", "CHEQUE", "Cheque", "Account No", "Account No.", "A/c No",
+        "MICR Code", "IFSC Code", "Bank Account", "Bank Details", "Account Details",
+        "Bank Branch", "Account Holder Name", "Pay to", "Pay To", "Bearer", "Order",
+        "Date", "Rs", "Rupees", "Amount in words", "Signature", "Drawer", "Drawee",
+        "Bank Address", "Branch Address", "Account Type", "Savings Account", "Current Account",
+        "Payee", "Bearer or Order", "Cheque Leaf", "Check", "CHECK", "CHQ", "Chq No"
     ],
     "Hospital Bills": [
         "invoice", "billing statement", "charges", "payment due", "service date",
@@ -268,6 +274,46 @@ def extract_text_from_tiff(tiff_file_bytes: bytes, max_pages=3) -> str:
         return f"Error extracting text from TIFF: {str(e)}"
 
 
+def extract_text_from_tiff_pages(tiff_file_bytes: bytes) -> list:
+    """Extract text from each page of a TIFF file separately using OCR.
+    Returns a list of text for each page."""
+    try:
+        # Open TIFF image from bytes
+        image = Image.open(io.BytesIO(tiff_file_bytes))
+
+        page_texts = []
+        page_count = 0
+
+        try:
+            while True:
+                # Extract text using OCR from current page
+                page_text = pytesseract.image_to_string(image, lang='eng')
+                if page_text and page_text.strip():
+                    page_texts.append(page_text)
+                else:
+                    page_texts.append("")  # Add empty string for pages with no text
+
+                page_count += 1
+                try:
+                    image.seek(page_count)
+                except EOFError:
+                    # End of pages reached
+                    break
+        except EOFError:
+            # Single page TIFF or end of pages - already processed
+            if not page_texts:
+                # If no pages were processed, it's a single page
+                page_text = pytesseract.image_to_string(image, lang='eng')
+                if page_text and page_text.strip():
+                    page_texts.append(page_text)
+                else:
+                    page_texts.append("")
+
+        return page_texts if page_texts else ["No text could be extracted from the TIFF file."]
+    except Exception as e:
+        return [f"Error extracting text from TIFF: {str(e)}"]
+
+
 def preprocess_text_for_header_detection(text):
     """
     Preprocess text to better detect headers, especially for OCR text which might have spacing issues.
@@ -356,6 +402,45 @@ def preprocess_text_for_header_detection(text):
     text = re.sub(r'E[\s\-]*KYC\s*AUTH\s*ENTICATION', 'E-KYC AUTHENTICATION', text, flags=re.IGNORECASE)
     text = re.sub(r'CER\s*SAI', 'CERSAI', text, flags=re.IGNORECASE)
     
+    # ========== CRITICAL: OCR ERROR CORRECTIONS FOR CANCELLED CHEQUES ==========
+    # Common OCR errors in cancelled cheques - CRITICAL for proper detection
+    text = text.replace('CAN( ELLED', 'CANCELLED')
+    text = text.replace('CANCELIED', 'CANCELLED')
+    text = text.replace('CANCEILED', 'CANCELLED')
+    text = text.replace('CH EQUE', 'CHEQUE')
+    text = text.replace('CHE OU E', 'CHEQUE')
+    text = text.replace('CHEQU E', 'CHEQUE')
+    text = text.replace('CH ECK', 'CHECK')
+    text = text.replace('A /C', 'A/C')
+    text = text.replace('A/ C', 'A/C')
+    text = text.replace('ACCOUNT N0', 'ACCOUNT NO')
+    text = text.replace('ACCO UNT', 'ACCOUNT')
+    text = text.replace('IFS CODE', 'IFSC CODE')  # Common OCR error: IFS vs IFSC
+    text = text.replace('IFS C', 'IFSC')
+    
+    # Fix spacing around cheque terms
+    text = re.sub(r'CAN\s*CEL\s*LED', 'CANCELLED', text, flags=re.IGNORECASE)
+    text = re.sub(r'CAN\s*CELED', 'CANCELLED', text, flags=re.IGNORECASE)
+    text = re.sub(r'CAN\s*CELLED', 'CANCELLED', text, flags=re.IGNORECASE)
+    text = re.sub(r'CHE\s*QUE', 'CHEQUE', text, flags=re.IGNORECASE)
+    text = re.sub(r'CH\s*EQ\s*UE', 'CHEQUE', text, flags=re.IGNORECASE)
+    text = re.sub(r'CANCELLED\s*CHEQUE', 'CANCELLED CHEQUE', text, flags=re.IGNORECASE)
+    text = re.sub(r'CANCELLED\s*CHECK', 'CANCELLED CHEQUE', text, flags=re.IGNORECASE)
+    text = re.sub(r'CANCELLED\s*CHQ', 'CANCELLED CHEQUE', text, flags=re.IGNORECASE)
+    text = re.sub(r'AC\s*COUNT\s*NO', 'ACCOUNT NO', text, flags=re.IGNORECASE)
+    text = re.sub(r'A\s*/\s*C\s*NO', 'A/C NO', text, flags=re.IGNORECASE)
+    text = re.sub(r'A\s*/\s*C', 'A/C', text, flags=re.IGNORECASE)
+    text = re.sub(r'IFS\s*C\s*ODE', 'IFSC CODE', text, flags=re.IGNORECASE)
+    text = re.sub(r'IFS\s*C', 'IFSC', text, flags=re.IGNORECASE)
+    text = re.sub(r'MIC\s*R', 'MICR', text, flags=re.IGNORECASE)
+    text = re.sub(r'PAY\s*TO', 'PAY TO', text, flags=re.IGNORECASE)
+    text = re.sub(r'PAY\s*SELF', 'PAY SELF', text, flags=re.IGNORECASE)
+    text = re.sub(r'BE\s*ARER', 'BEARER', text, flags=re.IGNORECASE)
+    text = re.sub(r'OR\s*DER', 'ORDER', text, flags=re.IGNORECASE)
+    text = re.sub(r'RU\s*PEES', 'RUPEES', text, flags=re.IGNORECASE)
+    text = re.sub(r'MULTI\s*[\-\s]*CITY\s*CHEQUE', 'MULTI-CITY CHEQUE', text, flags=re.IGNORECASE)
+    text = re.sub(r'VALID\s*FOR\s*(\d+)\s*MONTHS?', 'VALID FOR MONTHS', text, flags=re.IGNORECASE)
+    
     return text
 
 def check_keywords(text):
@@ -368,6 +453,54 @@ def check_keywords(text):
 
     # Boost scores for specific document headers
     header = text_lower[:500]  # Check first 500 chars for headers
+    
+    # ========== CRITICAL: CANCELLED CHEQUE DETECTION - HIGHEST PRIORITY ==========
+    # This MUST be checked FIRST before any other category to prevent misclassification
+    
+    # Pattern 1: Explicit "CANCELLED CHEQUE" text anywhere in document
+    if (re.search(r'\b(cancelled|canceled)\s*(cheque|check|chq)\b', text_lower, re.IGNORECASE) or 
+        re.search(r'\b(cheque|check|chq)\s*(cancelled|canceled)\b', text_lower, re.IGNORECASE)):
+        return "Cancelled cheque"
+    
+    # Pattern 2: Cheque structure indicators (PAY, PAY TO, PAY SELF, BEARER, ORDER) + Account number + Bank details
+    # This is the MOST COMMON pattern for cheques (even without "CANCELLED" text)
+    has_pay_structure = re.search(r'\b(pay\s*(to|self|to the order of)|bearer|order|drawee|drawer)\b', text_lower, re.IGNORECASE)
+    has_account = re.search(r'\b(account\s*(no|number|#)|a[\/\s]*c\s*(no|number|#))\s*[:]?\s*[0-9]+\b', text_lower, re.IGNORECASE)
+    has_bank_details = re.search(r'\b(ifsc|ifs\s*c|micr|bank|branch)\s*(code|number|name)?\s*[:]?\s*[A-Z0-9]+\b', text_lower, re.IGNORECASE)
+    no_medical_terms = not re.search(r'\b(bill|invoice|charge|patient|hospital|medical|treatment|diagnosis|gst|tax|consultation|room|bed|final\s*bill)\b', text_lower, re.IGNORECASE)
+    
+    if has_pay_structure and has_account and has_bank_details and no_medical_terms:
+        return "Cancelled cheque"  # Strong cheque structure match
+    
+    # Pattern 3: IFSC/MICR code + Account number pattern (even without PAY structure)
+    # IFSC format: 4 letters + 0 + 6 alphanumeric (e.g., SBIN0011724, HDFC0001234)
+    # MICR format: 9 digits typically
+    ifsc_pattern = re.search(r'\b(ifsc|ifs\s*c)\s*(code|number)?\s*[:]?\s*([A-Z]{4}0[A-Z0-9]{6,})\b', text_lower, re.IGNORECASE)
+    micr_pattern = re.search(r'\bmicr\s*(code|number)?\s*[:]?\s*([0-9]{6,})\b', text_lower, re.IGNORECASE)
+    account_pattern = re.search(r'\b(account\s*(no|number|#)|a[\/\s]*c\s*(no|number|#))\s*[:]?\s*([0-9]{6,})\b', text_lower, re.IGNORECASE)
+    
+    if (ifsc_pattern or micr_pattern) and account_pattern and no_medical_terms:
+        return "Cancelled cheque"  # IFSC/MICR + Account number = Cheque
+    
+    # Pattern 4: Cheque-specific keywords combination
+    # "RUPEES" + Amount in words/figures + Account number + Bank details
+    has_rupees = re.search(r'\brupees?\b', text_lower, re.IGNORECASE)
+    has_amount = re.search(r'\b(ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|crore)\s*(rupees?|only)\b', text_lower, re.IGNORECASE)
+    has_currency_symbol = re.search(r'₹|Rs\.?|INR', text_lower, re.IGNORECASE)
+    
+    if (has_rupees or has_amount or has_currency_symbol) and has_account and has_bank_details and no_medical_terms:
+        return "Cancelled cheque"  # Currency/amount indicators + account + bank = Cheque
+    
+    # Pattern 5: MULTI-CITY CHEQUE or VALID FOR X MONTHS (cheque-specific text)
+    if (re.search(r'\b(multi[\s\-]*city|valid\s*for\s*\d+\s*months?|cheque\s*leaf|please\s*sign)\b', text_lower, re.IGNORECASE) and 
+        has_account and no_medical_terms):
+        return "Cancelled cheque"  # Cheque-specific terminology
+    
+    # Pattern 6: Date field pattern (DDMMYYYY) + Account number + Bank (cheque structure)
+    # Cheques typically have date fields like "D D M M Y Y Y Y"
+    if (re.search(r'\b([0-9]{1,2}\s*[0-9]{1,2}\s*[0-9]{4}|d\s*d\s*m\s*m\s*y\s*y\s*y\s*y|date)\b', text_lower, re.IGNORECASE) and
+        has_account and has_bank_details and no_medical_terms):
+        return "Cancelled cheque"  # Date field + account + bank = Cheque structure
     
     # Special case for Pre-Auth forms - they should be prioritized even if they contain claim numbers
     if (re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
@@ -589,12 +722,43 @@ def check_keywords(text):
                 re.search(r'\bpre[\s\-]*auth\b', text_lower)):
             category_scores["Hospital Bills"] += 5
         
-    # Special patterns for cancelled cheques
-    if re.search(r'\b(ifsc|micr)\b.*?code', text_lower) or re.search(r'\baccount\b.*?\bnumber\b', text_lower):
-        category_scores["Cancelled cheque"] += 3
-        
-    if "cheque" in text_lower and ("cancel" in text_lower or "cancelled" in text_lower):
+    # Special patterns for cancelled cheques - HIGH PRIORITY
+    # Check for explicit cancelled cheque indicators
+    if re.search(r'\b(cancelled|canceled)\s*(cheque|check|chq)\b', text_lower, re.IGNORECASE) or re.search(r'\b(cheque|check|chq)\s*(cancelled|canceled)\b', text_lower, re.IGNORECASE):
+        category_scores["Cancelled cheque"] += 10
+        category_scores["Hospital Bills"] -= 5  # Reduce hospital bills score
+    
+    # Check for cheque leaf pattern (physical cheque structure)
+    if (re.search(r'\b(pay\s*(to|to the)|bearer|order|drawee|drawer)\b', text_lower) and 
+        re.search(r'\b(account\s*(no|number|#)|a\/c\s*(no|number))\b', text_lower) and
+        re.search(r'\b(ifsc|micr|bank|branch)\b', text_lower)):
+        category_scores["Cancelled cheque"] += 8
+        category_scores["Hospital Bills"] -= 4  # Reduce hospital bills score
+    
+    # Strong bank account indicators with cheque context
+    if (re.search(r'\b(ifsc|micr)\s*(code|number)\b', text_lower) and 
+        (re.search(r'\baccount\s*(no|number|#|holder)\b', text_lower) or 
+         re.search(r'\ba\/c\s*(no|number)\b', text_lower)) and
+        not re.search(r'\b(bill|invoice|charge|payment due|gst|tax)\b', text_lower)):
+        category_scores["Cancelled cheque"] += 7
+        category_scores["Hospital Bills"] -= 3  # Reduce hospital bills score
+    
+    # Cheque number with bank details (no bill/invoice context)
+    if (re.search(r'\b(cheque|check|chq)\s*(no|number|#)\b', text_lower) and
+        re.search(r'\b(bank|branch|ifsc|micr)\b', text_lower) and
+        not re.search(r'\b(final|bill|invoice|patient|hospital)\b', text_lower)):
+        category_scores["Cancelled cheque"] += 6
+        category_scores["Hospital Bills"] -= 3  # Reduce hospital bills score
+    
+    # Account number with bank name but no medical/billing terms
+    if (re.search(r'\baccount\s*(no|number|#)\b', text_lower) and 
+        re.search(r'\b(bank|branch|ifsc|micr)\b', text_lower) and
+        not re.search(r'\b(bill|invoice|charge|patient|hospital|medical|treatment|diagnosis)\b', text_lower)):
         category_scores["Cancelled cheque"] += 4
+    
+    # Basic cheque indicators
+    if "cheque" in text_lower or "check" in text_lower or re.search(r'\bchq\b', text_lower):
+        category_scores["Cancelled cheque"] += 2
     
     # Special patterns for pharmacy bills
     medicine_count = len(re.findall(r'\b(tablet|capsule|syrup|injection|ointment|ml|mg|dose|dosage)\b', text_lower))
@@ -649,7 +813,7 @@ def categorize_document_with_gemini(text):
     1. Claim Form (e.g., insurance or medical claim forms with fields for patient or policy details)
     2. Discharge Summary (e.g., medical summary of hospital stay, including diagnosis and treatment)
     3. Reports (e.g., medical or diagnostic reports like lab results or imaging reports)
-    4. Cancelled cheque (e.g., a bank cheque marked as "CANCELLED" used for verification of bank account details, contains account number, IFSC code, MICR code, bank name, branch name)
+    4. Cancelled cheque (e.g., a bank cheque marked as "CANCELLED" used for verification of bank account details, contains account number, IFSC code, MICR code, bank name, branch name, cheque structure with "PAY", "BEARER", "ORDER", "RUPEES")
     5. Hospital Bills (e.g., invoices or bills for medical services from hospitals)
     6. Pharmacy Bills (e.g., bills for medications and pharmacy products)
     7. Diagnostic Bills (e.g., bills for diagnostic tests and procedures)
@@ -657,8 +821,56 @@ def categorize_document_with_gemini(text):
     9. Pre-Auth form C (e.g., pre-authorization forms for medical procedures, pre-approval certificates)
     10. Others (e.g., any document that does not fit the above categories)
     
-    CRITICAL CLASSIFICATION RULES (in order of priority):
-    1. HEADER-BASED CLASSIFICATION (Highest Priority):
+    ⚠️⚠️⚠️ CRITICAL: YOU MUST CHECK FOR CANCELLED CHEQUE FIRST ⚠️⚠️⚠️
+    ⚠️⚠️⚠️ THIS IS THE HIGHEST PRIORITY - CHECK BEFORE ALL OTHER CATEGORIES ⚠️⚠️⚠️
+    
+    ========== STEP 1: CANCELLED CHEQUE DETECTION (MANDATORY FIRST STEP) ==========
+    
+    A document is "Cancelled cheque" if ANY of these patterns are found:
+    
+    ✅ PATTERN 1: Explicit cancelled cheque text
+       - Text contains "CANCELLED CHEQUE" OR "CANCELLED CHECK" OR "CANCELED CHEQUE"
+       - OR words "CANCELLED" + "CHEQUE/CHECK/CHQ" appear together
+       → IMMEDIATELY answer: "Cancelled cheque" (STOP - do not check other categories)
+    
+    ✅ PATTERN 2: Cheque payment structure (MOST COMMON - works even without "CANCELLED" word)
+       - Contains: "PAY" OR "PAY TO" OR "PAY SELF" OR "PAY TO THE ORDER OF"
+       - AND contains: "BEARER" OR "ORDER" OR "OR ORDER"
+       - AND contains: Account number (A/C No, A/C Number, Account No, Account Number with digits)
+       - AND contains: IFSC code (format like SBIN0011724, HDFC0001234) OR MICR code (9+ digits) OR Bank name OR Branch name
+       - AND DOES NOT contain: "patient", "hospital", "bill", "invoice", "charge", "medical", "treatment", "GST", "tax"
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ✅ PATTERN 3: IFSC/MICR code + Account number (STRONG INDICATOR)
+       - Contains: IFSC code (4 letters + 0 + 6 alphanumeric, e.g., "SBIN0011724", "HDFC0001234", "IFSC: SBIN0011724")
+       - OR contains: MICR code (9+ digits, e.g., "695002032", "MICR: 123456789")
+       - AND contains: Account number (A/C No, Account No with 6+ digits, e.g., "00001234556001")
+       - AND DOES NOT contain: "bill", "invoice", "patient", "hospital", "medical", "treatment", "charge", "GST", "tax"
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ✅ PATTERN 4: Currency/Amount indicators + Account + Bank
+       - Contains: "RUPEES" OR amount in words ("Ten thousand rupees only", "Hundred rupees")
+       - OR contains: Currency symbol (₹, Rs., INR, ₹10,000)
+       - AND contains: Account number
+       - AND contains: Bank details (IFSC/MICR/Bank name/Branch)
+       - AND DOES NOT contain medical/billing terms
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ✅ PATTERN 5: Cheque-specific terminology
+       - Contains: "MULTI-CITY CHEQUE" OR "VALID FOR 3 MONTHS" OR "VALID FOR X MONTHS" OR "CHEQUE LEAF" OR "PLEASE SIGN"
+       - AND contains: Account number
+       - AND DOES NOT contain medical/billing terms
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ⚠️ CRITICAL DISTINCTION: Cancelled cheque vs Hospital Bills ⚠️
+    - IF you see: "PAY" + Account number + IFSC/MICR + NO "patient"/"hospital"/"bill"/"invoice" → "Cancelled cheque"
+    - IF you see: "FINAL BILL" + Account number + "patient"/"hospital"/"charges"/"GST" → "Hospital Bills"
+    - KEY RULE: Bank account details (IFSC/MICR + Account) WITHOUT medical/billing context = "Cancelled cheque"
+    
+    ❌ ONLY IF NONE OF THE ABOVE PATTERNS MATCH, THEN PROCEED TO STEP 2:
+    
+    ========== STEP 2: OTHER CATEGORY CHECKS ==========
+    1. HEADER-BASED CLASSIFICATION:
        - If "PRE-APPROVAL CERTIFICATE", "PRE-AUTH", "PRE-AUTHORIZATION", "REQUEST FOR CASHLESS HOSPITALIZATION" in header → "Pre-Auth form C" (HIGHEST PRIORITY)
        - If "CLAIM FORM" appears in header/title → "Claim Form"
        - If "CLAIM NO" or "CLAIM NUMBER" appears anywhere in document → "Claim Form" (IMPORTANT: This overrides other classifications)
@@ -669,16 +881,27 @@ def categorize_document_with_gemini(text):
        - If "PHARMACY", "MEDICAL STORE", "CHEMIST" in header → "Pharmacy Bills"
     
     2. CONTENT-BASED CLASSIFICATION:
+       - CANCELLED CHEQUE (VERY IMPORTANT - Distinguish from Hospital Bills):
+         * Physical cheque structure: "PAY TO", "BEARER", "ORDER", "DRAWER", "DRAWEE"
+         * Bank details: Account number (A/C No, Account No), IFSC code, MICR code, Bank name, Branch name
+         * Cheque-specific fields: Cheque number, Date field, Amount in words, Signature section
+         * NO medical terms: Should NOT contain "patient", "hospital", "bill", "invoice", "charge", "medical", "treatment", "diagnosis"
+         * If you see "IFSC" or "MICR" code + Account number but NO medical/billing terms → "Cancelled cheque"
+         * If you see cheque structure (Pay to/Bearer/Order) + bank account details → "Cancelled cheque"
        - Pre-Auth forms: Estimated expenses, proposed treatment, authorized limit, BEFORE hospitalization language, "TO BE FILLED BY INSURED", future tense (proposed, planned, estimated, expected)
        - Claim Forms: Policy details, patient info, insurance details, TPA ID, claim numbers (CLAIM NO/CLAIM NUMBER), reimbursement fields, past tense (incurred, spent, paid, underwent)
        - Discharge Summaries: Admission/discharge dates, diagnosis, treatment details, clinical summary, follow-up advice
-       - Hospital Bills: Itemized charges for hospital services, room charges, procedure charges, consultation fees
+       - Hospital Bills: Itemized charges for hospital services, room charges, procedure charges, consultation fees, patient information, GST/tax information, bill numbers
        - Pharmacy Bills: Medication names, drug names, tablets, capsules, syrups, prescriptions, dosage info
        - Reports: Test results, reference ranges, diagnostic findings, laboratory values, units (mg/dL, mmol/L), NO pricing
        - KYC: Personal details, identity/address sections, customer info, photograph/signature fields
-       - Cancelled cheque: Bank account numbers, IFSC codes, MICR codes, bank/branch names
     
-    3. CONTEXT CLUES:
+    3. CONTEXT CLUES (CRITICAL DISTINCTIONS):
+       - CANCELLED CHEQUE vs HOSPITAL BILLS:
+         * Cancelled cheque: Has IFSC/MICR code + Account number BUT NO "bill", "invoice", "patient", "hospital", "medical", "treatment", "charge", "GST", "tax" → "Cancelled cheque"
+         * Cancelled cheque: Has cheque structure ("Pay to", "Bearer", "Order") + bank details → "Cancelled cheque"
+         * Hospital Bills: Has billing information, charges, patient details, medical services, GST/tax → "Hospital Bills"
+         * If document has bank account number + IFSC/MICR but NO medical/billing context → "Cancelled cheque" (NOT Hospital Bills)
        - Future tense (proposed, planned, estimated, expected) + "TO BE FILLED BY INSURED" → Pre-Auth form C (HIGHEST PRIORITY)
        - Past tense (incurred, spent, paid, underwent) → Claim Form
        - Presence of "CLAIM NO" or "CLAIM NUMBER" anywhere in document → Claim Form (IMPORTANT: This overrides other classifications)
@@ -763,7 +986,7 @@ def categorize_document_with_openai(text):
     1. Claim Form (e.g., insurance or medical claim forms with fields for patient or policy details)
     2. Discharge Summary (e.g., medical summary of hospital stay, including diagnosis and treatment)
     3. Reports (e.g., medical or diagnostic reports like lab results or imaging reports)
-    4. Cancelled cheque (e.g., a bank cheque marked as "CANCELLED" used for verification of bank account details, contains account number, IFSC code, MICR code, bank name, branch name)
+    4. Cancelled cheque (e.g., a bank cheque marked as "CANCELLED" used for verification of bank account details, contains account number, IFSC code, MICR code, bank name, branch name, cheque structure with "PAY", "BEARER", "ORDER", "RUPEES")
     5. Hospital Bills (e.g., invoices or bills for medical services from hospitals)
     6. Pharmacy Bills (e.g., bills for medications and pharmacy products)
     7. Diagnostic Bills (e.g., bills for diagnostic tests and procedures)
@@ -771,8 +994,56 @@ def categorize_document_with_openai(text):
     9. Pre-Auth form C (e.g., pre-authorization forms for medical procedures, pre-approval certificates)
     10. Others (e.g., any document that does not fit the above categories)
     
-    CRITICAL CLASSIFICATION RULES (in order of priority):
-    1. HEADER-BASED CLASSIFICATION (Highest Priority):
+    ⚠️⚠️⚠️ CRITICAL: YOU MUST CHECK FOR CANCELLED CHEQUE FIRST ⚠️⚠️⚠️
+    ⚠️⚠️⚠️ THIS IS THE HIGHEST PRIORITY - CHECK BEFORE ALL OTHER CATEGORIES ⚠️⚠️⚠️
+    
+    ========== STEP 1: CANCELLED CHEQUE DETECTION (MANDATORY FIRST STEP) ==========
+    
+    A document is "Cancelled cheque" if ANY of these patterns are found:
+    
+    ✅ PATTERN 1: Explicit cancelled cheque text
+       - Text contains "CANCELLED CHEQUE" OR "CANCELLED CHECK" OR "CANCELED CHEQUE"
+       - OR words "CANCELLED" + "CHEQUE/CHECK/CHQ" appear together
+       → IMMEDIATELY answer: "Cancelled cheque" (STOP - do not check other categories)
+    
+    ✅ PATTERN 2: Cheque payment structure (MOST COMMON - works even without "CANCELLED" word)
+       - Contains: "PAY" OR "PAY TO" OR "PAY SELF" OR "PAY TO THE ORDER OF"
+       - AND contains: "BEARER" OR "ORDER" OR "OR ORDER"
+       - AND contains: Account number (A/C No, A/C Number, Account No, Account Number with digits)
+       - AND contains: IFSC code (format like SBIN0011724, HDFC0001234) OR MICR code (9+ digits) OR Bank name OR Branch name
+       - AND DOES NOT contain: "patient", "hospital", "bill", "invoice", "charge", "medical", "treatment", "GST", "tax"
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ✅ PATTERN 3: IFSC/MICR code + Account number (STRONG INDICATOR)
+       - Contains: IFSC code (4 letters + 0 + 6 alphanumeric, e.g., "SBIN0011724", "HDFC0001234", "IFSC: SBIN0011724")
+       - OR contains: MICR code (9+ digits, e.g., "695002032", "MICR: 123456789")
+       - AND contains: Account number (A/C No, Account No with 6+ digits, e.g., "00001234556001")
+       - AND DOES NOT contain: "bill", "invoice", "patient", "hospital", "medical", "treatment", "charge", "GST", "tax"
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ✅ PATTERN 4: Currency/Amount indicators + Account + Bank
+       - Contains: "RUPEES" OR amount in words ("Ten thousand rupees only", "Hundred rupees")
+       - OR contains: Currency symbol (₹, Rs., INR, ₹10,000)
+       - AND contains: Account number
+       - AND contains: Bank details (IFSC/MICR/Bank name/Branch)
+       - AND DOES NOT contain medical/billing terms
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ✅ PATTERN 5: Cheque-specific terminology
+       - Contains: "MULTI-CITY CHEQUE" OR "VALID FOR 3 MONTHS" OR "VALID FOR X MONTHS" OR "CHEQUE LEAF" OR "PLEASE SIGN"
+       - AND contains: Account number
+       - AND DOES NOT contain medical/billing terms
+       → IMMEDIATELY answer: "Cancelled cheque"
+    
+    ⚠️ CRITICAL DISTINCTION: Cancelled cheque vs Hospital Bills ⚠️
+    - IF you see: "PAY" + Account number + IFSC/MICR + NO "patient"/"hospital"/"bill"/"invoice" → "Cancelled cheque"
+    - IF you see: "FINAL BILL" + Account number + "patient"/"hospital"/"charges"/"GST" → "Hospital Bills"
+    - KEY RULE: Bank account details (IFSC/MICR + Account) WITHOUT medical/billing context = "Cancelled cheque"
+    
+    ❌ ONLY IF NONE OF THE ABOVE PATTERNS MATCH, THEN PROCEED TO STEP 2:
+    
+    ========== STEP 2: OTHER CATEGORY CHECKS ==========
+    1. HEADER-BASED CLASSIFICATION:
        - If "PRE-APPROVAL CERTIFICATE", "PRE-AUTH", "PRE-AUTHORIZATION", "REQUEST FOR CASHLESS HOSPITALIZATION" in header → "Pre-Auth form C" (HIGHEST PRIORITY)
        - If "CLAIM FORM" appears in header/title → "Claim Form"
        - If "CLAIM NO" or "CLAIM NUMBER" appears anywhere in document → "Claim Form" (IMPORTANT: This overrides other classifications)
@@ -783,16 +1054,27 @@ def categorize_document_with_openai(text):
        - If "PHARMACY", "MEDICAL STORE", "CHEMIST" in header → "Pharmacy Bills"
     
     2. CONTENT-BASED CLASSIFICATION:
+       - CANCELLED CHEQUE (VERY IMPORTANT - Distinguish from Hospital Bills):
+         * Physical cheque structure: "PAY TO", "BEARER", "ORDER", "DRAWER", "DRAWEE"
+         * Bank details: Account number (A/C No, Account No), IFSC code, MICR code, Bank name, Branch name
+         * Cheque-specific fields: Cheque number, Date field, Amount in words, Signature section
+         * NO medical terms: Should NOT contain "patient", "hospital", "bill", "invoice", "charge", "medical", "treatment", "diagnosis"
+         * If you see "IFSC" or "MICR" code + Account number but NO medical/billing terms → "Cancelled cheque"
+         * If you see cheque structure (Pay to/Bearer/Order) + bank account details → "Cancelled cheque"
        - Pre-Auth forms: Estimated expenses, proposed treatment, authorized limit, BEFORE hospitalization language, "TO BE FILLED BY INSURED", future tense (proposed, planned, estimated, expected)
        - Claim Forms: Policy details, patient info, insurance details, TPA ID, claim numbers (CLAIM NO/CLAIM NUMBER), reimbursement fields, past tense (incurred, spent, paid, underwent)
        - Discharge Summaries: Admission/discharge dates, diagnosis, treatment details, clinical summary, follow-up advice
-       - Hospital Bills: Itemized charges for hospital services, room charges, procedure charges, consultation fees
+       - Hospital Bills: Itemized charges for hospital services, room charges, procedure charges, consultation fees, patient information, GST/tax information, bill numbers
        - Pharmacy Bills: Medication names, drug names, tablets, capsules, syrups, prescriptions, dosage info
        - Reports: Test results, reference ranges, diagnostic findings, laboratory values, units (mg/dL, mmol/L), NO pricing
        - KYC: Personal details, identity/address sections, customer info, photograph/signature fields
-       - Cancelled cheque: Bank account numbers, IFSC codes, MICR codes, bank/branch names
     
-    3. CONTEXT CLUES:
+    3. CONTEXT CLUES (CRITICAL DISTINCTIONS):
+       - CANCELLED CHEQUE vs HOSPITAL BILLS:
+         * Cancelled cheque: Has IFSC/MICR code + Account number BUT NO "bill", "invoice", "patient", "hospital", "medical", "treatment", "charge", "GST", "tax" → "Cancelled cheque"
+         * Cancelled cheque: Has cheque structure ("Pay to", "Bearer", "Order") + bank details → "Cancelled cheque"
+         * Hospital Bills: Has billing information, charges, patient details, medical services, GST/tax → "Hospital Bills"
+         * If document has bank account number + IFSC/MICR but NO medical/billing context → "Cancelled cheque" (NOT Hospital Bills)
        - Future tense (proposed, planned, estimated, expected) + "TO BE FILLED BY INSURED" → Pre-Auth form C (HIGHEST PRIORITY)
        - Past tense (incurred, spent, paid, underwent) → Claim Form
        - Presence of "CLAIM NO" or "CLAIM NUMBER" anywhere in document → Claim Form (IMPORTANT: This overrides other classifications)
@@ -819,7 +1101,7 @@ def categorize_document_with_openai(text):
             model="gpt-3.5-turbo",
             temperature=0,
             messages=[
-                {"role": "system", "content": "You are a document classification expert. Analyze the text and classify it into exactly one category: 'Claim Form', 'Discharge Summary', 'Reports', 'Cancelled cheque', 'Hospital Bills', 'Pharmacy Bills', 'Diagnostic Bills', 'KYC', 'Pre-Auth form C', or 'Others'. Prioritize header-based classification over content analysis. Respond with only the category name."},
+                {"role": "system", "content": "⚠️⚠️⚠️ CRITICAL INSTRUCTIONS ⚠️⚠️⚠️\n\nYou are a document classification expert. You MUST check for 'Cancelled cheque' FIRST before any other category.\n\nSTEP 1 - Check for Cancelled Cheque (MANDATORY FIRST):\n✅ If text contains 'CANCELLED CHEQUE' or 'CANCELLED CHECK' → Answer: 'Cancelled cheque'\n✅ If text contains 'PAY'/'PAY TO'/'PAY SELF' + Account number + IFSC/MICR/Bank + NO medical terms → Answer: 'Cancelled cheque'\n✅ If text contains IFSC code (format: 4 letters + 0 + 6 alphanumeric like SBIN0011724) + Account number + NO medical/billing terms → Answer: 'Cancelled cheque'\n✅ If text contains MICR code (9+ digits) + Account number + NO medical/billing terms → Answer: 'Cancelled cheque'\n✅ If text contains 'RUPEES' + Account number + Bank details + NO medical terms → Answer: 'Cancelled cheque'\n✅ If text contains 'MULTI-CITY CHEQUE' or 'VALID FOR X MONTHS' + Account number + NO medical terms → Answer: 'Cancelled cheque'\n\nSTEP 2 - Only if NOT a cancelled cheque, classify into: 'Claim Form', 'Discharge Summary', 'Reports', 'Hospital Bills', 'Pharmacy Bills', 'Diagnostic Bills', 'KYC', 'Pre-Auth form C', or 'Others'\n\n⚠️ REMEMBER: Documents with IFSC/MICR + Account number but WITHOUT medical/billing context are ALWAYS 'Cancelled cheque', NOT 'Hospital Bills'!\n\nRespond with ONLY the category name."},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -854,6 +1136,42 @@ def check_keywords_with_confidence(text):
     # Check for "Claim No" indicator - highest priority for claim forms
     if re.search(r'\bclaim\s*no[.:]?\b', text_lower, re.IGNORECASE):
         return {'category': "Claim Form", 'confidence': 1.0}
+    
+    # ========== CRITICAL: CANCELLED CHEQUE DETECTION - HIGHEST PRIORITY ==========
+    # Pattern 1: Explicit cancelled cheque text
+    if (re.search(r'\b(cancelled|canceled)\s*(cheque|check|chq)\b', text_lower, re.IGNORECASE) or 
+        re.search(r'\b(cheque|check|chq)\s*(cancelled|canceled)\b', text_lower, re.IGNORECASE)):
+        return {'category': "Cancelled cheque", 'confidence': 1.0}
+    
+    # Pattern 2: Cheque payment structure (PAY + Account + Bank details)
+    has_pay_structure = re.search(r'\b(pay\s*(to|self|to the order of)|bearer|order|drawee|drawer)\b', text_lower, re.IGNORECASE)
+    has_account = re.search(r'\b(account\s*(no|number|#)|a[\/\s]*c\s*(no|number|#))\s*[:]?\s*[0-9]+\b', text_lower, re.IGNORECASE)
+    has_bank_details = re.search(r'\b(ifsc|ifs\s*c|micr|bank|branch)\s*(code|number|name)?\s*[:]?\s*[A-Z0-9]+\b', text_lower, re.IGNORECASE)
+    no_medical_terms = not re.search(r'\b(bill|invoice|charge|patient|hospital|medical|treatment|diagnosis|gst|tax|consultation|room|bed|final\s*bill)\b', text_lower, re.IGNORECASE)
+    
+    if has_pay_structure and has_account and has_bank_details and no_medical_terms:
+        return {'category': "Cancelled cheque", 'confidence': 1.0}
+    
+    # Pattern 3: IFSC/MICR code + Account number pattern
+    ifsc_pattern = re.search(r'\b(ifsc|ifs\s*c)\s*(code|number)?\s*[:]?\s*([A-Z]{4}0[A-Z0-9]{6,})\b', text_lower, re.IGNORECASE)
+    micr_pattern = re.search(r'\bmicr\s*(code|number)?\s*[:]?\s*([0-9]{6,})\b', text_lower, re.IGNORECASE)
+    account_pattern = re.search(r'\b(account\s*(no|number|#)|a[\/\s]*c\s*(no|number|#))\s*[:]?\s*([0-9]{6,})\b', text_lower, re.IGNORECASE)
+    
+    if (ifsc_pattern or micr_pattern) and account_pattern and no_medical_terms:
+        return {'category': "Cancelled cheque", 'confidence': 1.0}
+    
+    # Pattern 4: Currency/Amount indicators + Account + Bank
+    has_rupees = re.search(r'\brupees?\b', text_lower, re.IGNORECASE)
+    has_amount = re.search(r'\b(ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|crore)\s*(rupees?|only)\b', text_lower, re.IGNORECASE)
+    has_currency_symbol = re.search(r'₹|Rs\.?|INR', text_lower, re.IGNORECASE)
+    
+    if (has_rupees or has_amount or has_currency_symbol) and has_account and has_bank_details and no_medical_terms:
+        return {'category': "Cancelled cheque", 'confidence': 1.0}
+    
+    # Pattern 5: Cheque-specific terminology
+    if (re.search(r'\b(multi[\s\-]*city|valid\s*for\s*\d+\s*months?|cheque\s*leaf|please\s*sign)\b', text_lower, re.IGNORECASE) and 
+        has_account and no_medical_terms):
+        return {'category': "Cancelled cheque", 'confidence': 1.0}
     
     if "discharge summary" in header:
         return {'category': "Discharge Summary", 'confidence': 1.0}
@@ -1298,30 +1616,183 @@ def process_file(uploaded_file):
         return page_texts, "PDF"
 
     elif file_extension in ['tiff', 'tif']:
-        # Convert TIFF to PDF and then process
+        # Extract text from each page of TIFF separately
         uploaded_file.seek(0)
         tiff_bytes = uploaded_file.read()
 
-        # First, try direct OCR on TIFF for better quality
-        extracted_text = extract_text_from_tiff(tiff_bytes)
-        return [extracted_text], "TIFF"  # Return as list for consistency
+        # Extract text from each page separately
+        page_texts = extract_text_from_tiff_pages(tiff_bytes)
+        return page_texts, "TIFF"
 
     else:
         return [f"Unsupported file format: {file_extension}"], "Unknown"
+
+
+def get_pdf_pages(uploaded_file):
+    """Extract PDF pages for reordering."""
+    uploaded_file.seek(0)
+    pdf_reader = PyPDF2.PdfReader(uploaded_file)
+    return pdf_reader
+
+
+def reorder_pdf_by_category(uploaded_file, page_categories):
+    """Reorder PDF pages by category and return the reordered PDF bytes."""
+    try:
+        uploaded_file.seek(0)
+        pdf_reader = PyPDF2.PdfReader(uploaded_file)
+        
+        # Create a list of (page_index, category) tuples
+        page_category_pairs = [(i, page_categories[i]) for i in range(len(page_categories))]
+        
+        # Group pages by category
+        category_groups = {}
+        for page_idx, category in page_category_pairs:
+            if category not in category_groups:
+                category_groups[category] = []
+            category_groups[category].append(page_idx)
+        
+        # Sort categories (you can customize the order here)
+        # Using the order from FILE_TYPE_EXTENSIONS as a base, then alphabetical for others
+        category_order = list(FILE_TYPE_EXTENSIONS.keys())
+        other_categories = [cat for cat in category_groups.keys() if cat not in category_order]
+        sorted_categories = [cat for cat in category_order if cat in category_groups] + sorted(other_categories)
+        
+        # Create new PDF with reordered pages
+        pdf_writer = PyPDF2.PdfWriter()
+        
+        for category in sorted_categories:
+            for page_idx in category_groups[category]:
+                pdf_writer.add_page(pdf_reader.pages[page_idx])
+        
+        # Write to bytes
+        output_buffer = io.BytesIO()
+        pdf_writer.write(output_buffer)
+        output_buffer.seek(0)
+        
+        return output_buffer.getvalue()
+    except Exception as e:
+        raise Exception(f"Error reordering PDF: {str(e)}")
+
+
+def reorder_tiff_by_category(uploaded_file, page_categories):
+    """Reorder TIFF pages by category by converting to PDF first."""
+    try:
+        uploaded_file.seek(0)
+        tiff_bytes = uploaded_file.read()
+        
+        # Convert TIFF to PDF first
+        pdf_bytes = convert_tiff_to_pdf(tiff_bytes)
+        
+        # Now reorder the PDF
+        pdf_file = io.BytesIO(pdf_bytes)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        # Create a list of (page_index, category) tuples
+        page_category_pairs = [(i, page_categories[i]) for i in range(len(page_categories))]
+        
+        # Group pages by category
+        category_groups = {}
+        for page_idx, category in page_category_pairs:
+            if category not in category_groups:
+                category_groups[category] = []
+            category_groups[category].append(page_idx)
+        
+        # Sort categories
+        category_order = list(FILE_TYPE_EXTENSIONS.keys())
+        other_categories = [cat for cat in category_groups.keys() if cat not in category_order]
+        sorted_categories = [cat for cat in category_order if cat in category_groups] + sorted(other_categories)
+        
+        # Create new PDF with reordered pages
+        pdf_writer = PyPDF2.PdfWriter()
+        
+        for category in sorted_categories:
+            for page_idx in category_groups[category]:
+                pdf_writer.add_page(pdf_reader.pages[page_idx])
+        
+        # Write to bytes
+        output_buffer = io.BytesIO()
+        pdf_writer.write(output_buffer)
+        output_buffer.seek(0)
+        
+        return output_buffer.getvalue()
+    except Exception as e:
+        raise Exception(f"Error reordering TIFF: {str(e)}")
+
+
+def get_reordered_page_categories(page_categories):
+    """Get the new page categories after reordering."""
+    # Create a list of (page_index, category) tuples
+    page_category_pairs = [(i, page_categories[i]) for i in range(len(page_categories))]
+    
+    # Group pages by category
+    category_groups = {}
+    for page_idx, category in page_category_pairs:
+        if category not in category_groups:
+            category_groups[category] = []
+        category_groups[category].append(page_idx)
+    
+    # Sort categories
+    category_order = list(FILE_TYPE_EXTENSIONS.keys())
+    other_categories = [cat for cat in category_groups.keys() if cat not in category_order]
+    sorted_categories = [cat for cat in category_order if cat in category_groups] + sorted(other_categories)
+    
+    # Create new ordered list
+    reordered_categories = []
+    for category in sorted_categories:
+        for _ in category_groups[category]:
+            reordered_categories.append(category)
+    
+    return reordered_categories
+
+
+def format_reordered_results(reordered_categories):
+    """Format the reordered results for display."""
+    if not reordered_categories:
+        return []
+    
+    grouped_results = []
+    current_category = reordered_categories[0]
+    start_page = 1
+    end_page = 1
+    
+    for i in range(1, len(reordered_categories)):
+        if reordered_categories[i] == current_category:
+            end_page = i + 1
+        else:
+            # Add the current group
+            if start_page == end_page:
+                grouped_results.append(f"Page {start_page}: {current_category}")
+            else:
+                grouped_results.append(f"Pages {start_page}-{end_page}: {current_category}")
+            
+            # Start new group
+            current_category = reordered_categories[i]
+            start_page = i + 1
+            end_page = i + 1
+    
+    # Add the last group
+    if start_page == end_page:
+        grouped_results.append(f"Page {start_page}: {current_category}")
+    else:
+        grouped_results.append(f"Pages {start_page}-{end_page}: {current_category}")
+    
+    return grouped_results
 
 
 def main():
     st.set_page_config(
         page_title="Document Categorization App",
         page_icon="📄",
-        layout="centered",
-        initial_sidebar_state="collapsed"
+        layout="centered"
     )
 
     st.title("📄 Multi-Page Document Categorization")
     st.subheader("Automatically categorize each page of your PDF and TIFF documents")
 
-    # Check which APIs are available and select automatically
+    # API Provider Selection
+    st.sidebar.header("🔧 Configuration")
+    
+    # Check which APIs are available    
     openai_available = openai_client is not None
     gemini_available = gemini_client is not None
     
@@ -1329,13 +1800,34 @@ def main():
         st.error("❌ No API keys found! Please set either OPENAI_API_KEY or GEMINI_API_KEY in your environment variables.")
         st.stop()
     
-    # Automatically select API provider (prefer OpenAI, fallback to Gemini)
+    # API Provider Selection
+    available_providers = []
     if openai_available:
-        api_provider = "openai"
-    elif gemini_available:
-        api_provider = "gemini"
+        available_providers.append("OpenAI")
+    if gemini_available:
+        available_providers.append("Gemini")
+    
+    if len(available_providers) == 1:
+        api_provider = available_providers[0].lower()
+        st.sidebar.info(f"Using {available_providers[0]} API")
     else:
-        api_provider = "openai"  # Default fallback
+        api_provider = st.sidebar.selectbox(
+            "Choose API Provider:",
+            available_providers,
+            help="Select which AI model to use for document categorization"
+        ).lower()
+    
+    # Display API status
+    st.sidebar.markdown("**API Status:**")
+    if openai_available:
+        st.sidebar.success("✅ OpenAI API Available")
+    else:
+        st.sidebar.error("❌ OpenAI API Not Available")
+    
+    if gemini_available:
+        st.sidebar.success("✅ Gemini API Available")
+    else:
+        st.sidebar.error("❌ Gemini API Not Available")
 
     # Display file type and extension mapping
     st.markdown("**File Type and Extension Mapping:**")
@@ -1377,16 +1869,60 @@ def main():
                 # Display results with nice formatting
                 st.success(f"Document processed successfully! ({len(page_texts)} page(s) processed as {file_type})")
 
-                st.subheader("📋 Document Classification Results")
+                # Create two columns for original and reordered results
+                col1, col2 = st.columns(2)
                 
-                # Display grouped results
-                st.markdown("**Page-by-Page Classification:**")
-                for result in grouped_results:
-                    st.write(f"📄 {result}")
+                with col1:
+                    st.subheader("📋 Original Document Order")
+                    st.markdown("**Page-by-Page Classification (Original):**")
+                    for result in grouped_results:
+                        st.write(f"📄 {result}")
+                
+                # Get reordered categories and format them
+                reordered_categories = get_reordered_page_categories(page_categories)
+                reordered_results = format_reordered_results(reordered_categories)
+                
+                with col2:
+                    st.subheader("🔄 Reordered Document Order")
+                    st.markdown("**Page-by-Page Classification (After Reordering):**")
+                    for result in reordered_results:
+                        st.write(f"📄 {result}")
+                
+                # Generate reordered PDF
+                reordered_pdf_bytes = None
+                try:
+                    uploaded_file.seek(0)
+                    file_extension = uploaded_file.name.lower().split('.')[-1]
+                    
+                    with st.spinner("Generating reordered PDF..."):
+                        if file_extension == 'pdf':
+                            reordered_pdf_bytes = reorder_pdf_by_category(uploaded_file, page_categories)
+                        elif file_extension in ['tiff', 'tif']:
+                            reordered_pdf_bytes = reorder_tiff_by_category(uploaded_file, page_categories)
+                        
+                        if reordered_pdf_bytes:
+                            st.success("✅ Reordered PDF generated successfully!")
+                            
+                            # Download button
+                            st.subheader("📥 Download Reordered Document")
+                            original_filename = uploaded_file.name
+                            file_name_without_ext = original_filename.rsplit('.', 1)[0]
+                            download_filename = f"{file_name_without_ext}_reordered.pdf"
+                            
+                            st.download_button(
+                                label="⬇️ Download Reordered PDF",
+                                data=reordered_pdf_bytes,
+                                file_name=download_filename,
+                                mime="application/pdf",
+                                help="Download the PDF with pages reordered by category"
+                            )
+                except Exception as e:
+                    st.error(f"❌ Error generating reordered PDF: {str(e)}")
+                    st.info("💡 Tip: The categorization is still available, but PDF reordering failed. This may occur with certain PDF formats.")
                 
                 # Add debug information if requested
                 with st.expander("🔍 Debug Information (Confidence Scores)"):
-                    st.write("**Individual Page Analysis:**")
+                    st.write("**Individual Page Analysis (Original Order):**")
                     for i, page_text in enumerate(page_texts):
                         if not (page_text.startswith("Error") or "No text could be extracted" in page_text):
                             result = categorize_document_with_confidence(page_text, api_provider)
