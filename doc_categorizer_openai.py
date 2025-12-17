@@ -9,6 +9,7 @@ from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
 import re
+from prompts import get_document_classification_prompt, get_openai_system_message
 
 # Load environment variables from .env file
 load_dotenv()
@@ -48,7 +49,10 @@ CATEGORY_KEYWORDS = {
         "Claim Number", "Claim Reference", "Claim Amount", "Claim Date", "Claim Submission",
         "Insurer", "Insurance Company", "Health Insurance", "Medical Insurance", "Policy Details",
         "Claimant", "Claimant Name", "Claimant Address", "Claimant Contact", "Claimant Signature",
-        "Declaration", "I hereby declare", "Signature of the Insured", "Date of Declaration"
+        "Declaration", "I hereby declare", "Signature of the Insured", "Date of Declaration",
+        "CLAIM NO", "CLAIM NUMBER", "REF NO", "REFERENCE NUMBER", "CLAIM REFERENCE",
+        "TOTAL AMOUNT CLAIMED", "AMOUNT CLAIMED", "REIMBURSEMENT", "AFTER HOSPITALIZATION",
+        "INURRED", "SPENT", "PAID", "UNDERWENT", "HOSPITALIZED", "TREATED"
     ],
     "Discharge Summary": [
         "Patient Name", "Age", "Sex", "W/o",
@@ -101,7 +105,9 @@ CATEGORY_KEYWORDS = {
         "Manufacturer", "Batch No", "Expiry Date", "Quantity",
         "Rate", "Amount", "SGST", "CTST",
         "TAX", "GSTN", "bed charges", "room charges", "doctor consultancy", "pathological investigation",
-        "cardiological investigation", "balance due", "net bill amt", "total bill amt"
+        "cardiological investigation", "balance due", "net bill amt", "total bill amt",
+        "FINAL BILL", "BILL NO", "BILL NUMBER", "TOTAL BILL AMT", "NET BILL AMT",
+        "HOSPITAL BILL", "INVOICE", "BILLING STATEMENT", "CHARGES", "PAYMENT DUE"
     ],
     "Pharmacy Bills": [
         "Name_Of_Biller", "Address_Of_Biller", "Address_Lines", "City", "State", "Pincode", "Name_Of_Patient", "Bill_Date", "Bill_No.", "Treating_Dr", "Bill_Items", "Sr_No", "Batch_No", "Expiry_No", "Description", "Unit", "Unit_Price", "Discount", "Actual_Price", "Is_Nme", "Is_Returned", "Expense_Category", "Expense_Code", "Name_Of_Implant", "Implant_Sticker_Number", "Total_Discount", "Total_Amount",
@@ -128,8 +134,12 @@ CATEGORY_KEYWORDS = {
         "Pre-Approval Certificate", "Pre-Auth", "Pre-Authorization", "Authorization Certificate", "Approval Certificate",
         "Estimated Expenses", "Authorized Limit", "Proposed Date Of Hospitalization", "Class Of Accommodation",
         "Estimated Expenses", "Amount Payable by Insured", "Compulsory Deduction", "Co-Payment", "Authorized Limit",
-        "PAC No", "Medical Superintendent", "Ref no", "Claim", "Policy No", "ID Card Number", "Nature Of Illness",
-        "Ailment", "Otolaryngology", "Proposed Date Of Hospitalization", "Estimated Duration", "Treating Doctor"
+        "PAC No", "Medical Superintendent", "Ref no", "Policy No", "ID Card Number", "Nature Of Illness",
+        "Ailment", "Otolaryngology", "Proposed Date Of Hospitalization", "Estimated Duration", "Treating Doctor",
+        "REQUEST FOR CASHLESS HOSPITALISATION", "REQUEST FOR CASHLESS HOSPITALIZATION", "TO BE FILLED BY INSURED",
+        "TO BE FILLED BY INSURED PATIENT", "PROPOSED TREATMENT", "ESTIMATED COST", "EXPECTED COST",
+        "PROPOSED DATE", "ESTIMATED DURATION", "AUTHORIZED AMOUNT", "PRE-APPROVAL", "PRE-AUTH FORM",
+        "CASH LESS", "CASHLESS", "BEFORE HOSPITALIZATION", "PRE-HOSPITALIZATION"
     ]
 }
 
@@ -274,6 +284,9 @@ def preprocess_text_for_header_detection(text):
     """
     # Convert multiple spaces to single space
     text = re.sub(r'\s+', ' ', text)
+
+    # Join hyphenated line breaks (e.g., "HOSPITALI-\nSATION")
+    text = re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
     
     # Common OCR errors in discharge summaries
     text = text.replace('0ISCHARGE', 'DISCHARGE')
@@ -358,6 +371,177 @@ def preprocess_text_for_header_detection(text):
     
     return text
 
+
+def has_cashless_request_indicator(text):
+    """
+    Detects 'REQUEST FOR CASHLESS HOSPITALISATION/HOSPITALIZATION' patterns
+    even when OCR introduces spaces, hyphens, or line breaks within words.
+    """
+    if not text:
+        return False
+
+    lowercase_text = text.lower()
+    # Quick check using regex allowing arbitrary whitespace/hyphens between words
+    if re.search(r'request\s*for\s*cash[\s-]*less\s*hospitali[sz]ation', lowercase_text, re.IGNORECASE):
+        return True
+
+    # Fallback: remove whitespace and hyphens to catch heavily distorted OCR output
+    compact_text = re.sub(r'[\s\-]+', '', lowercase_text)
+    if ('requestforcashlesshospitalisation' in compact_text or
+            'requestforcashlesshospitalization' in compact_text):
+        return True
+
+    return False
+
+
+def has_document_header(page_text):
+    """
+    Detect if a page has a clear document header/title.
+    Returns the category if a header is found, None otherwise.
+    """
+    if not page_text or page_text.startswith("Error") or "No text could be extracted" in page_text:
+        return None
+    
+    processed_text = preprocess_text_for_header_detection(page_text)
+    text_lower = processed_text.lower()
+    header = text_lower[:800]  # Check first 800 chars for headers (increased from 500)
+    
+    # Check for explicit document type headers (in priority order)
+    header_patterns = [
+        (r'\bpre[\s\-]*approval\s*certificate\b', "Pre-Auth form C"),
+        (r'\bpre[\s\-]*auth\b', "Pre-Auth form C"),
+        (r'\bpre[\s\-]*authorization\b', "Pre-Auth form C"),
+        (r'\brequest\s*for\s*cash[\s-]*less\s*hospitali[sz]ation\b', "Pre-Auth form C"),
+        (r'\bclaim\s*form\b', "Claim Form"),
+        (r'\bdischarge\s*summary\b', "Discharge Summary"),
+        (r'\bcentral\s*kyc\s*registry\b', "KYC"),
+        (r'\bcersai\b', "KYC"),
+        (r'\bkyc\s*application\s*form\b', "KYC"),
+        (r'\bknow\s*your\s*customer\b', "KYC"),
+        (r'\bfinal\s*bill\b', "Hospital Bills"),
+        (r'\bhospital.*bill\b', "Hospital Bills"),
+        (r'\btest\s*report\b', "Reports"),
+        (r'\blab(oratory)?\s*report\b', "Reports"),
+        (r'\bpharmacy\b', "Pharmacy Bills"),
+    ]
+    
+    for pattern, category in header_patterns:
+        if re.search(pattern, header, re.IGNORECASE):
+            return category
+    
+    # Also check for "CLAIM NO" which is a strong indicator
+    if re.search(r'\bclaim\s*no[.:]?\b', text_lower, re.IGNORECASE):
+        return "Claim Form"
+    
+    return None
+
+
+def is_likely_continuation_page(page_text, prev_category):
+    """
+    Determine if a page is likely a continuation of the previous document.
+    A continuation page typically:
+    - Lacks a clear document header
+    - Has content consistent with the previous page's category
+    - Doesn't have conflicting indicators for a different category
+    """
+    if not page_text or page_text.startswith("Error") or "No text could be extracted" in page_text:
+        return False
+    
+    # If this page has a clear header for a different category, it's not a continuation
+    page_header_category = has_document_header(page_text)
+    if page_header_category and page_header_category != prev_category:
+        return False
+    
+    # Check for STRONG conflicting indicators (be more lenient)
+    # Only reject if there are very strong conflicting indicators
+    if has_conflicting_indicators(page_text, prev_category):
+        # Double-check: if the conflicting indicator is weak, still allow continuation
+        processed_text = preprocess_text_for_header_detection(page_text)
+        text_lower = processed_text.lower()
+        header = text_lower[:500]
+        
+        # Strong conflicting indicators that should definitely prevent continuation
+        strong_conflicts = {
+            "Claim Form": [
+                r'\bdischarge\s*summary\b',
+                r'\bfinal\s*bill\b'
+            ],
+            "Discharge Summary": [
+                r'\bclaim\s*form\b',
+                r'\bfinal\s*bill\b'
+            ],
+            "Hospital Bills": [
+                r'\bclaim\s*form\b',
+                r'\bdischarge\s*summary\b'
+            ]
+        }
+        
+        if prev_category in strong_conflicts:
+            for pattern in strong_conflicts[prev_category]:
+                if re.search(pattern, header, re.IGNORECASE):
+                    return False  # Strong conflict, not a continuation
+    
+    # Check if page has very little text (might be blank/separator)
+    if len(page_text.strip()) < 50:
+        return True  # Likely continuation if very little content
+    
+    # Check if content is consistent with previous category
+    processed_text = preprocess_text_for_header_detection(page_text)
+    text_lower = processed_text.lower()
+    
+    # Category-specific continuation indicators
+    continuation_indicators = {
+        "Claim Form": [
+            r'\b(policy|insured|patient|claim|reimbursement|tpa|insurance)\b',
+            r'\b(name|address|phone|email|bank|account)\b',
+            r'\b(date\s*of\s*admission|date\s*of\s*discharge)\b',
+            r'\b(signature|declaration|i\s*hereby)\b',
+            r'\b(total\s*amount|amount\s*claimed)\b'
+        ],
+        "Discharge Summary": [
+            r'\b(diagnosis|treatment|medication|follow\s*up|clinical)\b',
+            r'\b(admission|discharge|condition|advice)\b',
+            r'\b(tab|capsule|syrup|injection|ointment)\b',
+            r'\b(patient\s*name|age|sex|consultant)\b'
+        ],
+        "Hospital Bills": [
+            r'\b(bill|charge|amount|gst|tax|invoice)\b',
+            r'\b(room|bed|consultation|procedure|service)\b',
+            r'\b(item\s*code|rate|quantity|total)\b',
+            r'\b(patient\s*name|bill\s*no|bill\s*date)\b'
+        ],
+        "Pre-Auth form C": [
+            r'\b(proposed|estimated|authorized|pre[\s\-]*auth)\b',
+            r'\b(treatment|hospitalization|expenses)\b',
+            r'\b(to\s*be\s*filled|insured|policy)\b'
+        ],
+        "Reports": [
+            r'\b(test|result|reference\s*range|units?)\b',
+            r'\b(lab|diagnostic|specimen|reporting)\b',
+            r'\b(mg/dl|mmol/l|normal|abnormal)\b'
+        ],
+        "KYC": [
+            r'\b(personal\s*details|identity|address|proof)\b',
+            r'\b(photograph|signature|customer|applicant)\b',
+            r'\b(pan|aadhaar|passport|voter)\b'
+        ]
+    }
+    
+    if prev_category in continuation_indicators:
+        patterns = continuation_indicators[prev_category]
+        matches = sum(1 for pattern in patterns if re.search(pattern, text_lower, re.IGNORECASE))
+        # If at least one indicator matches, likely continuation
+        if matches > 0:
+            return True
+    
+    # More lenient: if no strong conflicting header and page doesn't have its own header,
+    # and we're in a sequence, allow continuation
+    if not page_header_category:
+        # No header on this page - more likely to be continuation if no strong conflicts
+        return True
+    
+    return False
+
 def check_keywords(text):
     """Check for category-specific keywords in the text and return the most likely category."""
     # Preprocess text for better header detection
@@ -370,7 +554,10 @@ def check_keywords(text):
     header = text_lower[:500]  # Check first 500 chars for headers
     
     # Special case for Pre-Auth forms - they should be prioritized even if they contain claim numbers
-    if (re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
+    cashless_request_header = has_cashless_request_indicator(header)
+    
+    if (cashless_request_header or
+        re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
         re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or
         re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE) or
         re.search(r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b', header, re.IGNORECASE)):
@@ -398,7 +585,7 @@ def check_keywords(text):
         return "KYC"  # Immediate return for explicit KYC header
     
     # Check for explicit pre-authorization indicators - high priority
-    if re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE) or re.search(r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b', header, re.IGNORECASE):
+    if cashless_request_header or re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE) or re.search(r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b', header, re.IGNORECASE):
         category_scores["Pre-Auth form C"] += 10
         return "Pre-Auth form C"  # Immediate return for explicit pre-auth header
     
@@ -494,6 +681,7 @@ def check_keywords(text):
         r'\bpre[\s\-]*authorization\b',
         r'\bauthorization\s*certificate\b',
         r'\bapproval\s*certificate\b',
+        r'\brequest\s*for\s*cash[\s\-]*less\b',
         r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b',
         r'\bdetails\s*of\s*the\s*third\s*party\s*administrator\b',
         r'\bto\s*be\s*filled\s*by\s*insured\s*patient\b'
@@ -642,63 +830,7 @@ def categorize_document_with_gemini(text):
         return keyword_result
 
     # Fallback to Gemini if keyword check is inconclusive
-    prompt = f"""You are an expert in document classification. 
-    Based on the text content below (extracted from a single page of a PDF document, possibly using OCR from scanned or image-based PDFs), 
-    identify which category this document page belongs to from the following options:
-    
-    1. Claim Form (e.g., insurance or medical claim forms with fields for patient or policy details)
-    2. Discharge Summary (e.g., medical summary of hospital stay, including diagnosis and treatment)
-    3. Reports (e.g., medical or diagnostic reports like lab results or imaging reports)
-    4. Cancelled cheque (e.g., a bank cheque marked as "CANCELLED" used for verification of bank account details, contains account number, IFSC code, MICR code, bank name, branch name)
-    5. Hospital Bills (e.g., invoices or bills for medical services from hospitals)
-    6. Pharmacy Bills (e.g., bills for medications and pharmacy products)
-    7. Diagnostic Bills (e.g., bills for diagnostic tests and procedures)
-    8. KYC (e.g., Know Your Customer documents, identity verification)
-    9. Pre-Auth form C (e.g., pre-authorization forms for medical procedures, pre-approval certificates)
-    10. Others (e.g., any document that does not fit the above categories)
-    
-    CRITICAL CLASSIFICATION RULES (in order of priority):
-    1. HEADER-BASED CLASSIFICATION (Highest Priority):
-       - If "PRE-APPROVAL CERTIFICATE", "PRE-AUTH", "PRE-AUTHORIZATION", "REQUEST FOR CASHLESS HOSPITALIZATION" in header → "Pre-Auth form C" (HIGHEST PRIORITY)
-       - If "CLAIM FORM" appears in header/title → "Claim Form"
-       - If "CLAIM NO" or "CLAIM NUMBER" appears anywhere in document → "Claim Form" (IMPORTANT: This overrides other classifications)
-       - If "DISCHARGE SUMMARY" appears in header/title → "Discharge Summary"  
-       - If "CENTRAL KYC REGISTRY", "CERSAI", "KYC APPLICATION FORM", "KNOW YOUR CUSTOMER" in header → "KYC"
-       - If "FINAL BILL" or hospital name with billing info in header → "Hospital Bills"
-       - If "TEST REPORT", "LAB REPORT", "DIAGNOSTICS" in header → "Reports"
-       - If "PHARMACY", "MEDICAL STORE", "CHEMIST" in header → "Pharmacy Bills"
-    
-    2. CONTENT-BASED CLASSIFICATION:
-       - Pre-Auth forms: Estimated expenses, proposed treatment, authorized limit, BEFORE hospitalization language, "TO BE FILLED BY INSURED", future tense (proposed, planned, estimated, expected)
-       - Claim Forms: Policy details, patient info, insurance details, TPA ID, claim numbers (CLAIM NO/CLAIM NUMBER), reimbursement fields, past tense (incurred, spent, paid, underwent)
-       - Discharge Summaries: Admission/discharge dates, diagnosis, treatment details, clinical summary, follow-up advice
-       - Hospital Bills: Itemized charges for hospital services, room charges, procedure charges, consultation fees
-       - Pharmacy Bills: Medication names, drug names, tablets, capsules, syrups, prescriptions, dosage info
-       - Reports: Test results, reference ranges, diagnostic findings, laboratory values, units (mg/dL, mmol/L), NO pricing
-       - KYC: Personal details, identity/address sections, customer info, photograph/signature fields
-       - Cancelled cheque: Bank account numbers, IFSC codes, MICR codes, bank/branch names
-    
-    3. CONTEXT CLUES:
-       - Future tense (proposed, planned, estimated, expected) + "TO BE FILLED BY INSURED" → Pre-Auth form C (HIGHEST PRIORITY)
-       - Past tense (incurred, spent, paid, underwent) → Claim Form
-       - Presence of "CLAIM NO" or "CLAIM NUMBER" anywhere in document → Claim Form (IMPORTANT: This overrides other classifications)
-       - Test values with units but no prices → Reports
-       - Service charges with prices → Hospital Bills
-       - Medication lists with prices → Pharmacy Bills
-    
-    4. DOCUMENT BOUNDARY DETECTION:
-       - Each page should be classified independently based on its own content
-       - Do NOT assume continuity from previous pages
-       - Look for clear document headers and content indicators on each individual page
-       - If a page has "CLAIM FORM" in the header, it should be classified as "Claim Form" regardless of what the previous page was
-    
-    IMPORTANT: Focus on the MOST PROMINENT document type indicators on THIS SPECIFIC PAGE. If multiple types are present, prioritize based on header information first, then content density. Each page is a separate document that should be classified independently.
-    
-    Respond with ONLY the category name.
-    
-    Document content:
-    {processed_text[:4000]}
-    """
+    prompt = get_document_classification_prompt(processed_text)
 
     try:
         response = gemini_client.generate_content(prompt)
@@ -756,70 +888,14 @@ def categorize_document_with_openai(text):
         return keyword_result
 
     # Fallback to OpenAI if keyword check is inconclusive
-    prompt = f"""You are an expert in document classification. 
-    Based on the text content below (extracted from a single page of a PDF document, possibly using OCR from scanned or image-based PDFs), 
-    identify which category this document page belongs to from the following options:
-    
-    1. Claim Form (e.g., insurance or medical claim forms with fields for patient or policy details)
-    2. Discharge Summary (e.g., medical summary of hospital stay, including diagnosis and treatment)
-    3. Reports (e.g., medical or diagnostic reports like lab results or imaging reports)
-    4. Cancelled cheque (e.g., a bank cheque marked as "CANCELLED" used for verification of bank account details, contains account number, IFSC code, MICR code, bank name, branch name)
-    5. Hospital Bills (e.g., invoices or bills for medical services from hospitals)
-    6. Pharmacy Bills (e.g., bills for medications and pharmacy products)
-    7. Diagnostic Bills (e.g., bills for diagnostic tests and procedures)
-    8. KYC (e.g., Know Your Customer documents, identity verification)
-    9. Pre-Auth form C (e.g., pre-authorization forms for medical procedures, pre-approval certificates)
-    10. Others (e.g., any document that does not fit the above categories)
-    
-    CRITICAL CLASSIFICATION RULES (in order of priority):
-    1. HEADER-BASED CLASSIFICATION (Highest Priority):
-       - If "PRE-APPROVAL CERTIFICATE", "PRE-AUTH", "PRE-AUTHORIZATION", "REQUEST FOR CASHLESS HOSPITALIZATION" in header → "Pre-Auth form C" (HIGHEST PRIORITY)
-       - If "CLAIM FORM" appears in header/title → "Claim Form"
-       - If "CLAIM NO" or "CLAIM NUMBER" appears anywhere in document → "Claim Form" (IMPORTANT: This overrides other classifications)
-       - If "DISCHARGE SUMMARY" appears in header/title → "Discharge Summary"  
-       - If "CENTRAL KYC REGISTRY", "CERSAI", "KYC APPLICATION FORM", "KNOW YOUR CUSTOMER" in header → "KYC"
-       - If "FINAL BILL" or hospital name with billing info in header → "Hospital Bills"
-       - If "TEST REPORT", "LAB REPORT", "DIAGNOSTICS" in header → "Reports"
-       - If "PHARMACY", "MEDICAL STORE", "CHEMIST" in header → "Pharmacy Bills"
-    
-    2. CONTENT-BASED CLASSIFICATION:
-       - Pre-Auth forms: Estimated expenses, proposed treatment, authorized limit, BEFORE hospitalization language, "TO BE FILLED BY INSURED", future tense (proposed, planned, estimated, expected)
-       - Claim Forms: Policy details, patient info, insurance details, TPA ID, claim numbers (CLAIM NO/CLAIM NUMBER), reimbursement fields, past tense (incurred, spent, paid, underwent)
-       - Discharge Summaries: Admission/discharge dates, diagnosis, treatment details, clinical summary, follow-up advice
-       - Hospital Bills: Itemized charges for hospital services, room charges, procedure charges, consultation fees
-       - Pharmacy Bills: Medication names, drug names, tablets, capsules, syrups, prescriptions, dosage info
-       - Reports: Test results, reference ranges, diagnostic findings, laboratory values, units (mg/dL, mmol/L), NO pricing
-       - KYC: Personal details, identity/address sections, customer info, photograph/signature fields
-       - Cancelled cheque: Bank account numbers, IFSC codes, MICR codes, bank/branch names
-    
-    3. CONTEXT CLUES:
-       - Future tense (proposed, planned, estimated, expected) + "TO BE FILLED BY INSURED" → Pre-Auth form C (HIGHEST PRIORITY)
-       - Past tense (incurred, spent, paid, underwent) → Claim Form
-       - Presence of "CLAIM NO" or "CLAIM NUMBER" anywhere in document → Claim Form (IMPORTANT: This overrides other classifications)
-       - Test values with units but no prices → Reports
-       - Service charges with prices → Hospital Bills
-       - Medication lists with prices → Pharmacy Bills
-    
-    4. DOCUMENT BOUNDARY DETECTION:
-       - Each page should be classified independently based on its own content
-       - Do NOT assume continuity from previous pages
-       - Look for clear document headers and content indicators on each individual page
-       - If a page has "CLAIM FORM" in the header, it should be classified as "Claim Form" regardless of what the previous page was
-    
-    IMPORTANT: Focus on the MOST PROMINENT document type indicators on THIS SPECIFIC PAGE. If multiple types are present, prioritize based on header information first, then content density. Each page is a separate document that should be classified independently.
-    
-    Respond with ONLY the category name.
-    
-    Document content:
-    {processed_text[:4000]}
-    """
+    prompt = get_document_classification_prompt(processed_text)
 
     try:
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             temperature=0,
             messages=[
-                {"role": "system", "content": "You are a document classification expert. Analyze the text and classify it into exactly one category: 'Claim Form', 'Discharge Summary', 'Reports', 'Cancelled cheque', 'Hospital Bills', 'Pharmacy Bills', 'Diagnostic Bills', 'KYC', 'Pre-Auth form C', or 'Others'. Prioritize header-based classification over content analysis. Respond with only the category name."},
+                {"role": "system", "content": get_openai_system_message()},
                 {"role": "user", "content": prompt}
             ]
         )
@@ -846,6 +922,7 @@ def check_keywords_with_confidence(text):
     
     # Header analysis (first 500 characters) - highest confidence
     header = text_lower[:500]
+    cashless_request_header = has_cashless_request_indicator(header)
     
     # Strong header indicators (confidence 0.9-1.0)
     if re.search(r'\bclaim\s*form\b', header, re.IGNORECASE):
@@ -861,7 +938,8 @@ def check_keywords_with_confidence(text):
     if re.search(r'\bcentral\s*kyc\s*registry\b', header, re.IGNORECASE) or re.search(r'\bcersai\b', header, re.IGNORECASE):
         return {'category': "KYC", 'confidence': 1.0}
     
-    if (re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
+    if (cashless_request_header or
+        re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
         re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or
         re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE) or
         re.search(r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b', header, re.IGNORECASE)):
@@ -906,6 +984,234 @@ def categorize_document(text):
     return result['category'] if result['category'] else "Others"
 
 
+def format_output_compact(page_categories):
+    """
+    Format page categories into compact output format: Category1 (start–end), Category2 (start–end), ...
+    
+    Args:
+        page_categories: List of category strings for each page (1-indexed pages)
+    
+    Returns:
+        Formatted string like "Claim Form (1–5), Discharge Summary (6–7), Hospital Bill (8–15)"
+    """
+    if not page_categories:
+        return ""
+    
+    # Category name mapping for output display
+    category_display_map = {
+        "Hospital Bills": "Hospital Bill",
+        "Pharmacy Bills": "Pharmacy Bill",
+        "Diagnostic Bills": "Diagnostic Bill"
+    }
+    
+    # Group consecutive pages with the same category
+    grouped = []
+    current_category = page_categories[0]
+    start_page = 1
+    end_page = 1
+    
+    for i in range(1, len(page_categories)):
+        if page_categories[i] == current_category:
+            end_page = i + 1
+        else:
+            # Add the current group
+            grouped.append((current_category, start_page, end_page))
+            
+            # Start new group
+            current_category = page_categories[i]
+            start_page = i + 1
+            end_page = i + 1
+    
+    # Add the last group
+    grouped.append((current_category, start_page, end_page))
+    
+    # Format the output
+    formatted_parts = []
+    for category, start, end in grouped:
+        # Map category name for display
+        display_category = category_display_map.get(category, category)
+        
+        # Format: Category (start–end) or Category (start) for single page
+        if start == end:
+            formatted_parts.append(f"{display_category} ({start})")
+        else:
+            formatted_parts.append(f"{display_category} ({start}–{end})")
+    
+    return ", ".join(formatted_parts)
+
+
+def detect_ambiguous_preauth_claim(page_text):
+    """
+    Detect if a page could be either Pre-Auth form C or Claim Form.
+    Returns True if ambiguous, False otherwise.
+    """
+    if not page_text or page_text.startswith("Error") or "No text could be extracted" in page_text:
+        return False
+    
+    processed_text = preprocess_text_for_header_detection(page_text)
+    text_lower = processed_text.lower()
+    header = text_lower[:500]
+    
+    # Check for both Pre-Auth and Claim Form indicators
+    has_preauth_indicators = (
+        has_cashless_request_indicator(header) or
+        re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or
+        re.search(r'\bpre[\s\-]*approval\b', header, re.IGNORECASE) or
+        re.search(r'\bproposed\s*(treatment|date|hospitalization)\b', text_lower, re.IGNORECASE) or
+        re.search(r'\bestimated\s*(expenses|cost)\b', text_lower, re.IGNORECASE) or
+        re.search(r'\bto\s*be\s*filled\s*by\s*insured\b', text_lower, re.IGNORECASE)
+    )
+    
+    has_claim_indicators = (
+        re.search(r'\bclaim\s*no[.:]?\b', text_lower, re.IGNORECASE) or
+        re.search(r'\bclaim\s*form\b', text_lower, re.IGNORECASE) or
+        re.search(r'\bclaim\s*number\b', text_lower, re.IGNORECASE) or
+        re.search(r'\btotal\s*amount\s*claimed\b', text_lower, re.IGNORECASE) or
+        re.search(r'\breimbursement\b', text_lower, re.IGNORECASE)
+    )
+    
+    # If both indicators are present and neither is clearly dominant, it's ambiguous
+    if has_preauth_indicators and has_claim_indicators:
+        # Check if one is clearly dominant
+        strong_preauth = (
+            has_cashless_request_indicator(header) or
+            re.search(r'\brequest\s*for\s*cashless\s*hospitali[sz]ation\b', text_lower, re.IGNORECASE)
+        )
+        strong_claim = re.search(r'\bclaim\s*no[.:]?\b', text_lower, re.IGNORECASE)
+        
+        # If neither is clearly dominant, it's ambiguous
+        if not (strong_preauth or strong_claim):
+            return True
+    
+    return False
+
+
+def post_process_categorization(page_results):
+    """
+    Post-process categorization results to verify and improve accuracy.
+    This function performs validation checks and corrections.
+    
+    Args:
+        page_results: List of dicts with 'category', 'confidence', 'page_num', 'page_text'
+    
+    Returns:
+        List of corrected page_results
+    """
+    corrected_results = []
+    
+    for i, result in enumerate(page_results):
+        category = result['category']
+        confidence = result['confidence']
+        page_text = result.get('page_text', '')
+        page_num = result.get('page_num', i + 1)
+        
+        # Skip processing if error in text extraction
+        if page_text.startswith("Error") or "No text could be extracted" in page_text:
+            corrected_results.append(result)
+            continue
+        
+        # Post-processing rules
+        processed_text = preprocess_text_for_header_detection(page_text)
+        text_lower = processed_text.lower()
+        header = text_lower[:500]
+        
+        # Rule 1: Verify Pre-Auth vs Claim Form distinction
+        # Pre-Auth forms should have future-oriented language
+        # Claim Forms should have past-oriented language
+        if category in ["Pre-Auth form C", "Claim Form"]:
+            has_future_language = any(term in text_lower for term in [
+                "proposed", "planned", "estimated", "expected", "to be filled",
+                "request for cashless", "pre-authorization", "pre-approval"
+            ])
+            has_past_language = any(term in text_lower for term in [
+                "incurred", "spent", "paid", "underwent", "hospitalized", "treated",
+                "claim no", "claim number", "reimbursement"
+            ])
+            
+            # Check if page is ambiguous
+            is_ambiguous = detect_ambiguous_preauth_claim(page_text)
+            
+            # If Pre-Auth but has strong claim indicators, reconsider
+            if category == "Pre-Auth form C" and has_past_language and not has_future_language:
+                if re.search(r'\bclaim\s*no[.:]?\b', text_lower, re.IGNORECASE):
+                    category = "Claim Form"
+                    confidence = min(0.9, confidence + 0.1)
+            
+            # If Claim Form but has strong pre-auth indicators, reconsider
+            if category == "Claim Form" and has_future_language and not has_past_language:
+                if has_cashless_request_indicator(header) or re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE):
+                    category = "Pre-Auth form C"
+                    confidence = min(0.9, confidence + 0.1)
+        
+        # Rule 2: Verify Hospital Bills vs Discharge Summary
+        # Hospital Bills should have billing/charges information
+        # Discharge Summary should have clinical information
+        if category in ["Hospital Bills", "Discharge Summary"]:
+            has_billing_info = any(term in text_lower for term in [
+                "bill no", "bill number", "total amount", "charges", "gst", "invoice",
+                "item code", "rate", "amount", "sgst", "cgst", "tax"
+            ])
+            has_clinical_info = any(term in text_lower for term in [
+                "diagnosis", "treatment", "admission date", "discharge date",
+                "clinical summary", "follow up", "medication", "procedure"
+            ])
+            
+            if category == "Discharge Summary" and has_billing_info and not has_clinical_info:
+                # Check if it's actually a hospital bill
+                if "final bill" in text_lower or "hospital" in text_lower:
+                    category = "Hospital Bills"
+                    confidence = min(0.9, confidence + 0.1)
+            
+            if category == "Hospital Bills" and has_clinical_info and not has_billing_info:
+                # Check if it's actually a discharge summary
+                if "discharge summary" in text_lower:
+                    category = "Discharge Summary"
+                    confidence = min(0.9, confidence + 0.1)
+        
+        # Rule 3: Verify Reports vs Bills
+        # Reports should have test results without prices
+        # Bills should have prices/charges
+        if category in ["Reports", "Hospital Bills", "Diagnostic Bills"]:
+            has_test_results = any(term in text_lower for term in [
+                "test report", "lab report", "reference range", "normal range",
+                "results", "units", "mg/dl", "mmol/l"
+            ])
+            has_prices = any(term in text_lower for term in [
+                "price", "cost", "charge", "amount", "rate", "total"
+            ])
+            
+            if category == "Reports" and has_prices and not has_test_results:
+                # Might be a diagnostic bill
+                if "diagnostic" in text_lower:
+                    category = "Diagnostic Bills"
+                    confidence = min(0.9, confidence + 0.1)
+                elif "hospital" in text_lower:
+                    category = "Hospital Bills"
+                    confidence = min(0.9, confidence + 0.1)
+        
+        # Rule 4: Context-based validation
+        # Check if category makes sense given surrounding pages
+        if i > 0 and i < len(page_results) - 1:
+            prev_category = corrected_results[-1]['category'] if corrected_results else page_results[i-1]['category']
+            next_category = page_results[i+1]['category'] if i+1 < len(page_results) else None
+            
+            # If current page is isolated (different from both neighbors), verify it
+            if prev_category != category and (next_category is None or next_category != category):
+                # Double-check with explicit indicators
+                explicit_category = check_explicit_document_indicators(page_text, category, confidence)
+                if explicit_category and explicit_category != category:
+                    category = explicit_category
+                    confidence = min(0.9, confidence + 0.1)
+        
+        # Update result
+        corrected_result = result.copy()
+        corrected_result['category'] = category
+        corrected_result['confidence'] = confidence
+        corrected_results.append(corrected_result)
+    
+    return corrected_results
+
+
 def categorize_multi_page_document(page_texts, api_provider="openai"):
     """Categorize each page of a multi-page document with context-aware continuity."""
     page_results = []
@@ -926,14 +1232,42 @@ def categorize_multi_page_document(page_texts, api_provider="openai"):
     # Third pass: apply context-aware continuity logic with improved boundary detection
     page_categories = apply_document_continuity_improved(page_results)
     
-    # Group consecutive pages with the same category
+    # Fourth pass: post-process to verify and improve categorization
+    # Update page_results with final categories for post-processing
+    for i, category in enumerate(page_categories):
+        page_results[i]['category'] = category
+    
+    page_results = post_process_categorization(page_results)
+    
+    # Extract final categories after post-processing
+    final_page_categories = [r['category'] for r in page_results]
+    
+    # Fifth pass: Apply final smoothing to merge small isolated groups
+    final_page_categories = apply_final_smoothing(final_page_categories, page_results)
+    
+    # Sixth pass: Apply aggressive merging for better grouping
+    final_page_categories = apply_aggressive_merging(final_page_categories, page_results)
+    
+    # Seventh pass: Pattern-based correction for common misclassification patterns
+    final_page_categories = apply_pattern_based_correction(final_page_categories, page_results)
+    
+    # Eighth pass: Final structure-based correction using majority voting in regions
+    final_page_categories = apply_structure_based_correction(final_page_categories, page_results)
+    
+    # Ninth pass: Final Pre-Auth form C extension check - ensure page 4 is Pre-Auth form C if pages 1-3 are
+    final_page_categories = ensure_preauth_continuation(final_page_categories, page_results)
+    
+    # Tenth pass: Final Claim Form extension check - ensure page 5 is Claim Form if pages 1-4 are
+    final_page_categories = ensure_claim_form_continuation(final_page_categories, page_results)
+    
+    # Group consecutive pages with the same category (for detailed display)
     grouped_results = []
-    current_category = page_categories[0]
+    current_category = final_page_categories[0]
     start_page = 1
     end_page = 1
     
-    for i in range(1, len(page_categories)):
-        if page_categories[i] == current_category:
+    for i in range(1, len(final_page_categories)):
+        if final_page_categories[i] == current_category:
             end_page = i + 1
         else:
             # Add the current group
@@ -943,7 +1277,7 @@ def categorize_multi_page_document(page_texts, api_provider="openai"):
                 grouped_results.append(f"Pages {start_page}-{end_page}: {current_category}")
             
             # Start new group
-            current_category = page_categories[i]
+            current_category = final_page_categories[i]
             start_page = i + 1
             end_page = i + 1
     
@@ -953,7 +1287,7 @@ def categorize_multi_page_document(page_texts, api_provider="openai"):
     else:
         grouped_results.append(f"Pages {start_page}-{end_page}: {current_category}")
     
-    return grouped_results, page_categories
+    return grouped_results, final_page_categories
 
 
 def check_explicit_document_indicators(page_text, current_category, confidence):
@@ -963,6 +1297,8 @@ def check_explicit_document_indicators(page_text, current_category, confidence):
     
     text_lower = page_text.lower()
     header = text_lower[:500]  # Check first 500 chars for headers
+    cashless_request_header = has_cashless_request_indicator(header)
+    cashless_request_body = has_cashless_request_indicator(page_text)
     
     # Strong header indicators that should override continuity
     if re.search(r'\bclaim\s*form\b', header, re.IGNORECASE):
@@ -978,7 +1314,8 @@ def check_explicit_document_indicators(page_text, current_category, confidence):
     if re.search(r'\bcentral\s*kyc\s*registry\b', header, re.IGNORECASE) or re.search(r'\bcersai\b', header, re.IGNORECASE):
         return "KYC"
     
-    if (re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
+    if (cashless_request_header or cashless_request_body or
+        re.search(r'\bpre[\s\-]*approval\s*certificate\b', header, re.IGNORECASE) or 
         re.search(r'\bpre[\s\-]*auth\b', header, re.IGNORECASE) or
         re.search(r'\bpre[\s\-]*authorization\b', header, re.IGNORECASE) or
         re.search(r'\brequest\s*for\s*cash\s*less\s*hospitali[sz]ation\b', header, re.IGNORECASE)):
@@ -1040,9 +1377,12 @@ def apply_document_continuity_improved(page_results):
         confidence = result['confidence']
         page_text = result.get('page_text', '')
         
-        # High confidence results (0.8+) are kept as-is
-        if confidence >= 0.8:
-            final_categories.append(category)
+        # Check if this page has a clear document header
+        page_header_category = has_document_header(page_text)
+        
+        # If page has a header, use that category (highest priority)
+        if page_header_category:
+            final_categories.append(page_header_category)
             continue
         
         # Check if this page has strong indicators for a specific document type
@@ -1051,31 +1391,243 @@ def apply_document_continuity_improved(page_results):
             final_categories.append(explicit_category)
             continue
         
+        # High confidence results (0.8+) are kept as-is, but check for explicit indicators first
+        if confidence >= 0.8:
+            final_categories.append(category)
+            continue
+        
+        # NEW: Check if previous page had a header and this page is likely a continuation
+        if i > 0:
+            prev_page_text = page_results[i-1].get('page_text', '')
+            prev_header_category = has_document_header(prev_page_text)
+            
+            if prev_header_category:
+                # Previous page had a header - check if this page is a continuation
+                if is_likely_continuation_page(page_text, prev_header_category):
+                    final_categories.append(prev_header_category)
+                    continue
+        
+        # Check if we're in a sequence of the same category (even without explicit header)
+        # If previous 2-3 pages are the same category and this page doesn't have a conflicting header, continue
+        # BUT be careful not to extend Claim Form into Discharge Summary territory
+        if i >= 2:
+            # Check last 2-3 pages
+            recent_categories = [page_results[j]['category'] for j in range(max(0, i-3), i)]
+            if len(recent_categories) >= 2:
+                # If all recent pages are the same category
+                if len(set(recent_categories)) == 1:
+                    dominant_category = recent_categories[0]
+                    
+                    # SPECIAL CASE: Don't extend Claim Form too far - check for Discharge Summary
+                    if dominant_category == "Claim Form" and i >= 5:
+                        # Check if this page (page 6+) has Discharge Summary indicators
+                        processed_text = preprocess_text_for_header_detection(page_text)
+                        text_lower = processed_text.lower()
+                        header = text_lower[:800]
+                        
+                        discharge_indicators = [
+                            r'\bdischarge\s*summary\b',
+                            r'\bdischarge\s*note\b',
+                            r'\bcondition\s*(on|at)\s*discharge\b',
+                            r'\btreatment\s*given\s*in\s*hospital\b'
+                        ]
+                        
+                        has_discharge = any(re.search(pattern, header, re.IGNORECASE) 
+                                          for pattern in discharge_indicators)
+                        
+                        if has_discharge:
+                            # This is Discharge Summary, don't extend Claim Form
+                            pass
+                        else:
+                            # Check if this page has a conflicting header
+                            page_header = has_document_header(page_text)
+                            if not page_header or page_header == dominant_category:
+                                # Check if this page conflicts with the dominant category
+                                if not has_conflicting_indicators(page_text, dominant_category):
+                                    # Check if it's a reasonable continuation
+                                    if is_likely_continuation_page(page_text, dominant_category) or confidence < 0.7:
+                                        final_categories.append(dominant_category)
+                                        continue
+                    else:
+                        # For other categories or early pages, use normal logic
+                        # Check if this page has a conflicting header
+                        page_header = has_document_header(page_text)
+                        if not page_header or page_header == dominant_category:
+                            # Check if this page conflicts with the dominant category
+                            if not has_conflicting_indicators(page_text, dominant_category):
+                                # Check if it's a reasonable continuation
+                                if is_likely_continuation_page(page_text, dominant_category) or confidence < 0.7:
+                                    final_categories.append(dominant_category)
+                                    continue
+        
         # Check if this page is within a document boundary
         document_type = get_document_type_for_page(i, document_boundaries, page_results)
         if document_type:
             final_categories.append(document_type)
             continue
         
-        # For low confidence results, apply continuity logic
+        # Check if we're in a continuation sequence (previous pages had headers)
+        # Look back to find the most recent page with a header
+        header_category = None
+        header_page_idx = None
+        for j in range(i-1, max(-1, i-5), -1):  # Look back up to 4 pages
+            if j >= 0:
+                prev_text = page_results[j].get('page_text', '')
+                prev_header = has_document_header(prev_text)
+                if prev_header:
+                    header_category = prev_header
+                    header_page_idx = j
+                    break
+        
+        # If we found a header recently and this page looks like a continuation
+        if header_category and header_page_idx is not None:
+            # Check if all pages between header and this one are also continuations
+            all_continuations = True
+            for j in range(header_page_idx + 1, i):
+                if j < len(page_results):
+                    inter_text = page_results[j].get('page_text', '')
+                    if not is_likely_continuation_page(inter_text, header_category):
+                        all_continuations = False
+                        break
+            
+            # If this page is also a continuation, use the header category
+            if all_continuations and is_likely_continuation_page(page_text, header_category):
+                final_categories.append(header_category)
+                continue
+        
+        # For low confidence results, apply continuity logic more aggressively
         if confidence < 0.6:
-            # Look for strong indicators in nearby pages
-            context_category = find_context_category(page_results, i)
+            # Look for strong indicators in nearby pages (extend search window)
+            context_category = find_context_category_extended(page_results, i, window=5)  # Increased window
             if context_category:
                 final_categories.append(context_category)
                 continue
+            
+            # If no context found, check previous and next pages
+            if i > 0 and i + 1 < len(page_results):
+                prev_cat = page_results[i-1]['category']
+                next_cat = page_results[i+1]['category']
+                
+                # If previous and next pages agree, use that category
+                if prev_cat == next_cat and page_results[i-1]['confidence'] >= 0.6:
+                    if not has_conflicting_indicators(page_text, prev_cat):
+                        final_categories.append(prev_cat)
+                        continue
+                
+                # Otherwise, prefer previous page's category if it has decent confidence
+                if page_results[i-1]['confidence'] >= 0.6:
+                    if not has_conflicting_indicators(page_text, prev_cat):
+                        final_categories.append(prev_cat)
+                        continue
         
-        # Medium confidence results - check for document boundaries
+        # Medium confidence results - check for document boundaries and continuity
         if 0.6 <= confidence < 0.8:
             # Check if this might be a continuation of previous document
-            if i > 0 and is_likely_continuation(page_results[i-1], result):
-                final_categories.append(page_results[i-1]['category'])
-                continue
+            if i > 0:
+                prev_category = page_results[i-1]['category']
+                prev_confidence = page_results[i-1]['confidence']
+                
+                # If previous page had same category and reasonable confidence, likely continuation
+                if prev_category == category or (prev_confidence >= 0.7 and is_likely_continuation(page_results[i-1], result)):
+                    final_categories.append(prev_category)
+                    continue
+                
+                # Check if previous page had high confidence, use that category (more aggressive)
+                if prev_confidence >= 0.7:  # Lowered threshold from 0.8 to 0.7
+                    # Only use previous category if it makes sense (not conflicting explicit indicators)
+                    if not has_conflicting_indicators(page_text, prev_category):
+                        final_categories.append(prev_category)
+                        continue
+                
+                # Also check next page for context
+                if i + 1 < len(page_results):
+                    next_category = page_results[i+1]['category']
+                    next_confidence = page_results[i+1]['confidence']
+                    
+                    # If next page has high confidence and matches previous, likely continuation
+                    if (next_confidence >= 0.7 and 
+                        next_category == prev_category and 
+                        not has_conflicting_indicators(page_text, prev_category)):
+                        final_categories.append(prev_category)
+                        continue
         
         # Default to original category
         final_categories.append(category)
     
     return final_categories
+
+
+def find_context_category_extended(page_results, current_index, window=3):
+    """Find the most likely category based on extended context from nearby pages."""
+    # Look at previous and next pages for strong indicators
+    context_pages = []
+    
+    # Check previous pages (extended window)
+    for i in range(max(0, current_index - window), current_index):
+        if page_results[i]['confidence'] >= 0.7:
+            context_pages.append(page_results[i])
+    
+    # Check next pages (extended window)
+    for i in range(current_index + 1, min(len(page_results), current_index + window + 1)):
+        if page_results[i]['confidence'] >= 0.7:
+            context_pages.append(page_results[i])
+    
+    if not context_pages:
+        return None
+    
+    # Find the most common high-confidence category in context
+    category_counts = {}
+    for page in context_pages:
+        cat = page['category']
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+    
+    # Return the most frequent category
+    if category_counts:
+        return max(category_counts, key=category_counts.get)
+    
+    return None
+
+
+def has_conflicting_indicators(page_text, category):
+    """Check if page text has strong indicators conflicting with the given category."""
+    if not page_text or page_text.startswith("Error") or "No text could be extracted" in page_text:
+        return False
+    
+    text_lower = page_text.lower()
+    header = text_lower[:500]
+    
+    # Define conflicting indicators for each category
+    conflicts = {
+        "Claim Form": [
+            r'\bdischarge\s*summary\b',
+            r'\bfinal\s*bill\b',
+            r'\bpre[\s\-]*auth\b',
+            r'\brequest\s*for\s*cashless\b'
+        ],
+        "Discharge Summary": [
+            r'\bclaim\s*form\b',
+            r'\bclaim\s*no[.:]?\b',
+            r'\bfinal\s*bill\b',
+            r'\bpre[\s\-]*auth\b'
+        ],
+        "Hospital Bills": [
+            r'\bclaim\s*form\b',
+            r'\bdischarge\s*summary\b',
+            r'\bpre[\s\-]*auth\b'
+        ],
+        "Pre-Auth form C": [
+            r'\bclaim\s*no[.:]?\b',
+            r'\bdischarge\s*summary\b',
+            r'\bfinal\s*bill\b'
+        ]
+    }
+    
+    if category in conflicts:
+        for pattern in conflicts[category]:
+            if re.search(pattern, header, re.IGNORECASE):
+                return True
+    
+    return False
 
 
 def apply_document_continuity(page_results):
@@ -1287,6 +1839,795 @@ def analyze_document_structure(page_results):
     return corrected_results
 
 
+def apply_final_smoothing(page_categories, page_results):
+    """
+    Apply final smoothing to merge small isolated groups of pages.
+    This helps merge pages that are part of the same document but were misclassified.
+    """
+    if len(page_categories) <= 2:
+        return page_categories
+    
+    smoothed = page_categories.copy()
+    
+    # Find small isolated groups (1-2 pages) surrounded by the same category
+    for i in range(1, len(smoothed) - 1):
+        current_cat = smoothed[i]
+        prev_cat = smoothed[i-1]
+        next_cat = smoothed[i+1] if i+1 < len(smoothed) else None
+        
+        # If current page is isolated (different from neighbors) and neighbors are the same
+        if current_cat != prev_cat and next_cat and prev_cat == next_cat:
+            # Check if current page has low confidence
+            if i < len(page_results) and page_results[i]['confidence'] < 0.7:
+                # Check if there's no strong conflicting indicator
+                page_text = page_results[i].get('page_text', '')
+                if not has_conflicting_indicators(page_text, prev_cat):
+                    smoothed[i] = prev_cat
+        
+        # If we have a small group (1-2 pages) of one category between larger groups of another
+        # Check if we should merge it
+        if i > 0 and i < len(smoothed) - 1:
+            # Look for patterns like: A, B, B, A or A, B, A
+            if smoothed[i-1] == smoothed[i+1] and smoothed[i] != smoothed[i-1]:
+                # Check if the isolated group is small and has low confidence
+                group_size = 1
+                if i > 1 and smoothed[i-2] == smoothed[i]:
+                    group_size = 2
+                if i < len(smoothed) - 2 and smoothed[i+2] == smoothed[i]:
+                    group_size = max(group_size, 2)
+                
+                # If it's a small isolated group (1-2 pages) with low confidence, merge it
+                if group_size <= 2:
+                    avg_confidence = 0.0
+                    count = 0
+                    for j in range(max(0, i-group_size), min(len(page_results), i+group_size+1)):
+                        if smoothed[j] == smoothed[i]:
+                            avg_confidence += page_results[j]['confidence']
+                            count += 1
+                    if count > 0:
+                        avg_confidence /= count
+                        
+                        # If average confidence is low, merge with surrounding category
+                        if avg_confidence < 0.65:
+                            page_text = page_results[i].get('page_text', '')
+                            if not has_conflicting_indicators(page_text, smoothed[i-1]):
+                                smoothed[i] = smoothed[i-1]
+                                if group_size == 2 and i > 0:
+                                    smoothed[i-1] = smoothed[i-1]
+    
+    return smoothed
+
+
+def apply_aggressive_merging(page_categories, page_results):
+    """
+    Apply aggressive merging to group consecutive pages more effectively.
+    This uses a sliding window approach to identify dominant categories and merge isolated pages.
+    """
+    if len(page_categories) <= 2:
+        return page_categories
+    
+    merged = page_categories.copy()
+    window_size = 3  # Look at 3 pages before and after
+    
+    # First, identify high-confidence anchor pages
+    anchor_pages = []
+    for i, result in enumerate(page_results):
+        if result['confidence'] >= 0.8:
+            anchor_pages.append((i, result['category']))
+    
+    # Use anchor pages to determine regions
+    if len(anchor_pages) < 2:
+        # Not enough anchors, use simpler approach
+        return apply_simple_merging(merged, page_results)
+    
+    # Create regions based on anchor pages
+    regions = []
+    for i in range(len(anchor_pages)):
+        start_idx = anchor_pages[i][0]
+        end_idx = anchor_pages[i+1][0] if i+1 < len(anchor_pages) else len(merged)
+        category = anchor_pages[i][1]
+        regions.append((start_idx, end_idx, category))
+    
+    # Merge pages in each region to the dominant category
+    for start_idx, end_idx, dominant_cat in regions:
+        # Count categories in this region
+        category_counts = {}
+        for i in range(start_idx, end_idx):
+            cat = merged[i]
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+        
+        # Find the most common category in this region
+        if category_counts:
+            most_common_cat = max(category_counts, key=category_counts.get)
+            
+            # If the most common category matches the anchor, use it for all pages in region
+            if most_common_cat == dominant_cat:
+                for i in range(start_idx, end_idx):
+                    # Only change if confidence is low or if it's a small isolated group
+                    if page_results[i]['confidence'] < 0.75:
+                        # Check for conflicting indicators
+                        page_text = page_results[i].get('page_text', '')
+                        if not has_conflicting_indicators(page_text, dominant_cat):
+                            merged[i] = dominant_cat
+    
+    # Apply simple merging for any remaining isolated groups
+    merged = apply_simple_merging(merged, page_results)
+    
+    return merged
+
+
+def apply_simple_merging(page_categories, page_results):
+    """
+    Simple merging: merge small isolated groups (1-2 pages) into surrounding dominant category.
+    """
+    if len(page_categories) <= 2:
+        return page_categories
+    
+    merged = page_categories.copy()
+    
+    # Pass 1: Merge single isolated pages
+    for i in range(1, len(merged) - 1):
+        if merged[i] != merged[i-1] and merged[i] != merged[i+1]:
+            # Isolated page - check if we should merge it
+            if page_results[i]['confidence'] < 0.7:
+                # Check which neighbor has higher confidence
+                prev_conf = page_results[i-1]['confidence']
+                next_conf = page_results[i+1]['confidence']
+                
+                if prev_conf > next_conf and prev_conf >= 0.6:
+                    page_text = page_results[i].get('page_text', '')
+                    if not has_conflicting_indicators(page_text, merged[i-1]):
+                        merged[i] = merged[i-1]
+                elif next_conf > prev_conf and next_conf >= 0.6:
+                    page_text = page_results[i].get('page_text', '')
+                    if not has_conflicting_indicators(page_text, merged[i+1]):
+                        merged[i] = merged[i+1]
+                elif merged[i-1] == merged[i+1]:
+                    # Both neighbors are the same, merge to that
+                    page_text = page_results[i].get('page_text', '')
+                    if not has_conflicting_indicators(page_text, merged[i-1]):
+                        merged[i] = merged[i-1]
+    
+    # Pass 2: Merge small groups (2 pages) that are isolated
+    for i in range(1, len(merged) - 2):
+        # Check for pattern: A, B, B, A (where B is a 2-page group)
+        if (merged[i-1] == merged[i+2] and 
+            merged[i] == merged[i+1] and 
+            merged[i] != merged[i-1]):
+            # Small group of 2 pages - check if we should merge
+            avg_conf = (page_results[i]['confidence'] + page_results[i+1]['confidence']) / 2
+            neighbor_conf = max(page_results[i-1]['confidence'], page_results[i+2]['confidence'])
+            
+            if avg_conf < 0.7 and neighbor_conf >= 0.6:
+                # Check for conflicting indicators
+                page_text_i = page_results[i].get('page_text', '')
+                page_text_i1 = page_results[i+1].get('page_text', '')
+                if (not has_conflicting_indicators(page_text_i, merged[i-1]) and
+                    not has_conflicting_indicators(page_text_i1, merged[i-1])):
+                    merged[i] = merged[i-1]
+                    merged[i+1] = merged[i-1]
+    
+    # Pass 3: Use sliding window to determine dominant category
+    window = 5
+    for i in range(len(merged)):
+        if page_results[i]['confidence'] < 0.7:
+            # Look at surrounding pages in window
+            start = max(0, i - window)
+            end = min(len(merged), i + window + 1)
+            
+            category_counts = {}
+            confidence_sum = {}
+            for j in range(start, end):
+                if j != i:
+                    cat = merged[j]
+                    category_counts[cat] = category_counts.get(cat, 0) + 1
+                    confidence_sum[cat] = confidence_sum.get(cat, 0) + page_results[j]['confidence']
+            
+            if category_counts:
+                # Find category with highest weighted score (count * avg_confidence)
+                best_cat = None
+                best_score = 0
+                for cat, count in category_counts.items():
+                    avg_conf = confidence_sum[cat] / count
+                    score = count * avg_conf
+                    if score > best_score:
+                        best_score = score
+                        best_cat = cat
+                
+                if best_cat and best_cat != merged[i]:
+                    # Check for conflicting indicators
+                    page_text = page_results[i].get('page_text', '')
+                    if not has_conflicting_indicators(page_text, best_cat):
+                        merged[i] = best_cat
+    
+    return merged
+
+
+def apply_pattern_based_correction(page_categories, page_results):
+    """
+    Apply pattern-based corrections for common misclassification scenarios.
+    This looks for specific patterns and corrects them based on document structure.
+    """
+    if len(page_categories) < 3:
+        return page_categories
+    
+    corrected = page_categories.copy()
+    
+    # Pattern 1: Claim Form at start, then other category, then Claim Form again
+    # This suggests the middle pages might be Claim Form continuation
+    if (corrected[0] == "Claim Form" and 
+        len(corrected) > 5 and
+        any(corrected[i] == "Claim Form" for i in range(5, min(10, len(corrected))))):
+        
+        # Find the first Claim Form after the initial group
+        first_claim_after = None
+        for i in range(1, min(10, len(corrected))):
+            if corrected[i] == "Claim Form" and i > 3:
+                first_claim_after = i
+                break
+        
+        if first_claim_after:
+            # Check if pages between initial Claim Form and this one should be Claim Form
+            # Look at the category distribution
+            initial_claim_end = 0
+            for i in range(len(corrected)):
+                if corrected[i] != "Claim Form":
+                    initial_claim_end = i
+                    break
+            
+            # If there's a gap, check if it should be filled with Claim Form
+            if initial_claim_end < first_claim_after:
+                # Check confidence of pages in the gap
+                gap_pages = corrected[initial_claim_end:first_claim_after]
+                avg_confidence = sum(page_results[i]['confidence'] 
+                                    for i in range(initial_claim_end, first_claim_after)) / len(gap_pages)
+                
+                # If average confidence is low, likely continuation of Claim Form
+                if avg_confidence < 0.75:
+                    # Check if any page has strong conflicting indicators
+                    should_merge = True
+                    for i in range(initial_claim_end, first_claim_after):
+                        page_text = page_results[i].get('page_text', '')
+                        if has_conflicting_indicators(page_text, "Claim Form"):
+                            should_merge = False
+                            break
+                    
+                    if should_merge:
+                        for i in range(initial_claim_end, first_claim_after):
+                            corrected[i] = "Claim Form"
+    
+    # Pattern 1b: Claim Form sequence at start - extend if next pages don't have strong headers
+    # BUT stop immediately if we encounter Discharge Summary indicators
+    if len(corrected) >= 5 and corrected[0] == "Claim Form":
+        # Find where Claim Form sequence ends
+        claim_end = 0
+        for i in range(len(corrected)):
+            if corrected[i] != "Claim Form":
+                claim_end = i
+                break
+        else:
+            claim_end = len(corrected)
+        
+        # If we have at least 3 Claim Form pages and next page might be continuation
+        if claim_end >= 3 and claim_end < len(corrected):
+            next_page_idx = claim_end
+            next_page_text = page_results[next_page_idx].get('page_text', '')
+            next_header = has_document_header(next_page_text)
+            
+            # CRITICAL: Check for Discharge Summary indicators first
+            processed_text = preprocess_text_for_header_detection(next_page_text)
+            text_lower = processed_text.lower()
+            header = text_lower[:800]
+            
+            # STRONG Discharge Summary indicators that should stop Claim Form extension
+            # Only use the strongest indicators to avoid false positives
+            strong_discharge_indicators = [
+                r'\bdischarge\s*summary\b',  # Must have this
+                r'\bdischarge\s*note\b'
+            ]
+            
+            # Weaker indicators that might appear in Claim Forms too
+            weak_discharge_indicators = [
+                r'\bcondition\s*(on|at)\s*discharge\b',
+                r'\btreatment\s*given\s*in\s*hospital\b',
+                r'\bpatient\s*name.*age.*sex\b',
+                r'\bdiagnosis\b.*\btreatment\b',
+                r'\bfollow\s*up\s*(note|advice)\b'
+            ]
+            
+            has_strong_discharge = any(re.search(pattern, header, re.IGNORECASE) 
+                                      for pattern in strong_discharge_indicators)
+            has_weak_discharge = any(re.search(pattern, header, re.IGNORECASE) 
+                                    for pattern in weak_discharge_indicators)
+            
+            # Check for Claim Form indicators on this page
+            claim_indicators = [
+                r'\bclaim\s*form\b',
+                r'\bclaim\s*no[.:]?\b',
+                r'\bpolicy\s*(no|number)\b',
+                r'\btotal\s*amount\s*claimed\b',
+                r'\breimbursement\b'
+            ]
+            has_claim_indicators = any(re.search(pattern, header, re.IGNORECASE) 
+                                     for pattern in claim_indicators)
+            
+            # Decision logic:
+            # - If page has STRONG Discharge Summary header, don't extend Claim Form
+            # - If page 5 (index 4) and has weak discharge indicators BUT also has claim indicators, extend Claim Form
+            # - If page 6+ (index 5+), don't extend Claim Form if it has discharge indicators
+            if next_header == "Discharge Summary" or has_strong_discharge:
+                # Don't extend - this is clearly Discharge Summary
+                pass
+            elif next_page_idx == 4:  # Page 5 (0-indexed)
+                # For page 5, be more lenient - extend Claim Form if:
+                # - It doesn't have strong Discharge Summary header, AND
+                # - It has Claim Form indicators OR is likely continuation
+                if has_claim_indicators or is_likely_continuation_page(next_page_text, "Claim Form"):
+                    corrected[next_page_idx] = "Claim Form"
+                elif has_weak_discharge and not has_claim_indicators:
+                    # Has weak discharge indicators but no claim indicators - might be Discharge Summary
+                    # But only if confidence is low
+                    if page_results[next_page_idx]['confidence'] < 0.7:
+                        pass  # Don't extend, let it be Discharge Summary
+                    else:
+                        # Medium confidence - extend Claim Form
+                        corrected[next_page_idx] = "Claim Form"
+                else:
+                    # No clear indicators - extend Claim Form if it's a continuation
+                    if is_likely_continuation_page(next_page_text, "Claim Form"):
+                        corrected[next_page_idx] = "Claim Form"
+            elif next_page_idx < 4:  # Pages 1-4
+                # For earlier pages, always extend if it's a continuation
+                if is_likely_continuation_page(next_page_text, "Claim Form"):
+                    corrected[next_page_idx] = "Claim Form"
+    
+    # Pattern 2: Hospital Bills with isolated Claim Form pages in between
+    # This suggests those isolated pages might be Hospital Bills continuation
+    hospital_bill_regions = []
+    start = None
+    for i, cat in enumerate(corrected):
+        if cat == "Hospital Bills":
+            if start is None:
+                start = i
+        else:
+            if start is not None:
+                hospital_bill_regions.append((start, i))
+                start = None
+    if start is not None:
+        hospital_bill_regions.append((start, len(corrected)))
+    
+    # For each Hospital Bills region, check for isolated Claim Form pages
+    for start_idx, end_idx in hospital_bill_regions:
+        if end_idx - start_idx > 2:  # Only for regions with more than 2 pages
+            for i in range(start_idx, end_idx):
+                if corrected[i] == "Claim Form":
+                    # Check if this is an isolated Claim Form in a Hospital Bills region
+                    prev_cat = corrected[i-1] if i > 0 else None
+                    next_cat = corrected[i+1] if i+1 < len(corrected) else None
+                    
+                    if (prev_cat == "Hospital Bills" or next_cat == "Hospital Bills"):
+                        # Check confidence
+                        if page_results[i]['confidence'] < 0.75:
+                            page_text = page_results[i].get('page_text', '')
+                            if not has_conflicting_indicators(page_text, "Hospital Bills"):
+                                corrected[i] = "Hospital Bills"
+    
+    # Pattern 3: Discharge Summary detection and protection
+    # If pages have Discharge Summary indicators but were classified as something else, correct them
+    for i in range(len(corrected)):
+        page_text = page_results[i].get('page_text', '')
+        processed_text = preprocess_text_for_header_detection(page_text)
+        text_lower = processed_text.lower()
+        header = text_lower[:800]
+        full_text = text_lower  # Check full text too
+        
+        # Check for Discharge Summary indicators (both in header and body)
+        discharge_indicators = [
+            r'\bdischarge\s*summary\b',
+            r'\bdischarge\s*note\b',
+            r'\bcondition\s*(on|at)\s*discharge\b',
+            r'\btreatment\s*given\s*in\s*hospital\b',
+            r'\bdiagnosis\b.*\btreatment\b',
+            r'\bfollow\s*up\s*(note|advice)\b',
+            r'\bpatient\s*name.*age.*sex.*admission\b'  # Common discharge summary pattern
+        ]
+        
+        has_discharge_header = any(re.search(pattern, header, re.IGNORECASE) 
+                                  for pattern in discharge_indicators)
+        has_discharge_body = any(re.search(pattern, full_text, re.IGNORECASE) 
+                                for pattern in discharge_indicators[:4])  # Check key patterns in full text
+        
+        # Check for billing indicators to distinguish from Hospital Bills
+        has_billing_info = any(term in text_lower for term in [
+            "bill no", "bill number", "total amount", "charges", "gst", "invoice",
+            "item code", "rate", "amount", "sgst", "cgst", "tax", "final bill"
+        ])
+        
+        # Check for clinical indicators (stronger for Discharge Summary)
+        has_clinical_info = any(term in text_lower for term in [
+            "diagnosis", "treatment given", "admission date", "discharge date",
+            "clinical summary", "follow up", "medication", "procedure", "condition on discharge"
+        ])
+        
+        # If page has Discharge Summary header, it should be Discharge Summary
+        page_header = has_document_header(page_text)
+        if page_header == "Discharge Summary":
+            corrected[i] = "Discharge Summary"
+        # If page has strong Discharge Summary indicators and was misclassified, correct it
+        # Check for Claim Form, Hospital Bills, or Pharmacy Bills that should be Discharge Summary
+        elif (has_discharge_header or has_discharge_body) and corrected[i] in ["Claim Form", "Hospital Bills", "Pharmacy Bills"]:
+            # Check for STRONG Discharge Summary header (not just body indicators)
+            strong_discharge_patterns = [
+                r'\bdischarge\s*summary\b',  # Must have this in header
+                r'\bdischarge\s*note\b'
+            ]
+            has_strong_discharge_header = any(re.search(pattern, header, re.IGNORECASE) 
+                                             for pattern in strong_discharge_patterns)
+            
+            # For pages 5-9 (indices 4-8), prioritize Discharge Summary if it has clinical info
+            # and doesn't have strong billing indicators
+            if 4 <= i <= 8:  # Pages 5-9 (0-indexed)
+                # Check if it has clinical info but not strong billing info
+                if has_clinical_info and (has_strong_discharge_header or not has_billing_info):
+                    # Check for conflicting indicators
+                    claim_indicators = [
+                        r'\bclaim\s*form\b',
+                        r'\bclaim\s*no[.:]?\b',
+                        r'\bpolicy\s*(no|number)\b',
+                        r'\btotal\s*amount\s*claimed\b'
+                    ]
+                    has_strong_claim = any(re.search(pattern, header, re.IGNORECASE) 
+                                         for pattern in claim_indicators)
+                    
+                    # If it's Hospital Bills or Pharmacy Bills with discharge indicators, convert
+                    if corrected[i] in ["Hospital Bills", "Pharmacy Bills"]:
+                        if has_strong_discharge_header or (has_clinical_info and not has_billing_info):
+                            if not has_strong_claim:
+                                corrected[i] = "Discharge Summary"
+                    # If it's Claim Form, be more conservative
+                    elif corrected[i] == "Claim Form":
+                        if has_strong_discharge_header and not has_strong_claim:
+                            if page_results[i]['confidence'] < 0.85:
+                                corrected[i] = "Discharge Summary"
+            # For pages 6+ (i >= 5), check if it should be Discharge Summary
+            elif i >= 5:  # Pages 6+ (0-indexed, so i=5 is page 6)
+                # Check confidence - if low or medium, likely misclassified
+                if page_results[i]['confidence'] < 0.85:
+                    # Also check if it doesn't have strong Claim Form indicators
+                    claim_indicators = [
+                        r'\bclaim\s*form\b',
+                        r'\bclaim\s*no[.:]?\b',
+                        r'\bpolicy\s*(no|number)\b',
+                        r'\btotal\s*amount\s*claimed\b'
+                    ]
+                    has_strong_claim = any(re.search(pattern, header, re.IGNORECASE) 
+                                         for pattern in claim_indicators)
+                    
+                    # If it's Hospital Bills or Pharmacy Bills with discharge indicators, convert
+                    if corrected[i] in ["Hospital Bills", "Pharmacy Bills"]:
+                        if has_strong_discharge_header or (has_clinical_info and not has_billing_info):
+                            if not has_strong_claim:
+                                corrected[i] = "Discharge Summary"
+                    # If it's Claim Form
+                    elif corrected[i] == "Claim Form":
+                        if not has_strong_claim:
+                            corrected[i] = "Discharge Summary"
+            elif i == 4 and has_strong_discharge_header:  # Page 5 (index 4) with STRONG header
+                # Only convert page 5 if it has a very clear Discharge Summary header
+                # AND doesn't have Claim Form indicators
+                claim_indicators = [
+                    r'\bclaim\s*form\b',
+                    r'\bclaim\s*no[.:]?\b',
+                    r'\bpolicy\s*(no|number)\b'
+                ]
+                has_strong_claim = any(re.search(pattern, header, re.IGNORECASE) 
+                                     for pattern in claim_indicators)
+                
+                if not has_strong_claim and page_results[i]['confidence'] < 0.8:
+                    corrected[i] = "Discharge Summary"
+    
+    # Pattern 4: Discharge Summary in middle of other document types
+    # If Discharge Summary is surrounded by same category on both sides, might be misclassified
+    for i in range(1, len(corrected) - 1):
+        if corrected[i] == "Discharge Summary":
+            prev_cat = corrected[i-1]
+            next_cat = corrected[i+1] if i+1 < len(corrected) else None
+            
+            # If surrounded by same category (and it's not Discharge Summary), check if should merge
+            # BUT only if Discharge Summary indicators are weak
+            if next_cat and prev_cat == next_cat and prev_cat != "Discharge Summary":
+                page_text = page_results[i].get('page_text', '')
+                page_header = has_document_header(page_text)
+                
+                # If page has strong Discharge Summary header, don't merge
+                if page_header == "Discharge Summary":
+                    continue  # Keep as Discharge Summary
+                
+                # Check if this is a small group
+                group_size = 1
+                if i > 1 and corrected[i-2] == "Discharge Summary":
+                    group_size += 1
+                if i+2 < len(corrected) and corrected[i+2] == "Discharge Summary":
+                    group_size += 1
+                
+                # If small group with low confidence, might be continuation
+                if group_size <= 2:
+                    avg_conf = sum(page_results[j]['confidence'] 
+                                  for j in range(max(0, i-group_size+1), min(len(corrected), i+group_size))) / group_size
+                    if avg_conf < 0.75:
+                        # Check for Discharge Summary indicators
+                        processed_text = preprocess_text_for_header_detection(page_text)
+                        text_lower = processed_text.lower()
+                        header = text_lower[:800]
+                        
+                        discharge_indicators = [
+                            r'\bdischarge\s*summary\b',
+                            r'\bdischarge\s*note\b',
+                            r'\bcondition\s*(on|at)\s*discharge\b'
+                        ]
+                        
+                        has_discharge = any(re.search(pattern, header, re.IGNORECASE) 
+                                          for pattern in discharge_indicators)
+                        
+                        # Only merge if no strong Discharge Summary indicators
+                        if not has_discharge and not has_conflicting_indicators(page_text, prev_cat):
+                            corrected[i] = prev_cat
+                            if group_size == 2 and i > 0:
+                                corrected[i-1] = prev_cat
+    
+    # Pattern 5: Distinguish Hospital Bills from Pharmacy Bills
+    # Hospital Bills typically have: room charges, procedure charges, consultation fees, itemized hospital services
+    # Pharmacy Bills typically have: medication names, drug names, tablets, capsules, syrups
+    # For pages 10+ (indices 9+), if classified as Pharmacy Bills but has hospital billing indicators, convert to Hospital Bills
+    for i in range(len(corrected)):
+        if corrected[i] == "Pharmacy Bills" and i >= 9:  # Pages 10+ (0-indexed, so i=9 is page 10)
+            page_text = page_results[i].get('page_text', '')
+            processed_text = preprocess_text_for_header_detection(page_text)
+            text_lower = processed_text.lower()
+            
+            # Check for Hospital Bills indicators
+            hospital_bill_indicators = [
+                r'\bfinal\s*bill\b',
+                r'\bhospital.*bill\b',
+                r'\bbill\s*no[.:]?\b',
+                r'\bbill\s*number\b',
+                r'\broom\s*charges?\b',
+                r'\bprocedure\s*charges?\b',
+                r'\bconsultation\s*fees?\b',
+                r'\bitem\s*code\b',
+                r'\bgstn\b',
+                r'\bsgst\b',
+                r'\bcgst\b',
+                r'\btotal\s*bill\s*amt\b',
+                r'\bnet\s*bill\s*amt\b',
+                r'\bip\s*no\b',
+                r'\bward\s*name\b',
+                r'\bbed\s*no\b',
+                r'\blos\b'  # Length of stay
+            ]
+            
+            # Check for Pharmacy Bills indicators
+            pharmacy_bill_indicators = [
+                r'\bpharmacy\b',
+                r'\bmedical\s*store\b',
+                r'\bchemist\b',
+                r'\bdrugstore\b',
+                r'\bdispensary\b',
+                r'\btablet\b',
+                r'\bcapsule\b',
+                r'\bsyrup\b',
+                r'\binjection\b',
+                r'\bprescription\b',
+                r'\bdosage\b',
+                r'\bmrp\b',
+                r'\bretail\s*price\b'
+            ]
+            
+            has_hospital_bill_indicators = any(re.search(pattern, text_lower, re.IGNORECASE) 
+                                              for pattern in hospital_bill_indicators)
+            has_pharmacy_bill_indicators = any(re.search(pattern, text_lower, re.IGNORECASE) 
+                                               for pattern in pharmacy_bill_indicators)
+            
+            # If it has hospital billing indicators but not strong pharmacy indicators, convert to Hospital Bills
+            if has_hospital_bill_indicators and not has_pharmacy_bill_indicators:
+                # Also check if it doesn't have Discharge Summary indicators
+                discharge_indicators = [
+                    r'\bdischarge\s*summary\b',
+                    r'\bdischarge\s*note\b',
+                    r'\bcondition\s*(on|at)\s*discharge\b',
+                    r'\btreatment\s*given\s*in\s*hospital\b'
+                ]
+                has_discharge = any(re.search(pattern, text_lower, re.IGNORECASE) 
+                                   for pattern in discharge_indicators)
+                
+                if not has_discharge:
+                    corrected[i] = "Hospital Bills"
+            # If it has both but hospital indicators are stronger (e.g., "FINAL BILL"), prefer Hospital Bills
+            elif has_hospital_bill_indicators and has_pharmacy_bill_indicators:
+                # Check for strong hospital bill header
+                header = text_lower[:500]
+                if re.search(r'\bfinal\s*bill\b', header, re.IGNORECASE) or re.search(r'\bhospital.*bill\b', header, re.IGNORECASE):
+                    corrected[i] = "Hospital Bills"
+    
+    return corrected
+
+
+def apply_structure_based_correction(page_categories, page_results):
+    """
+    Apply structure-based correction using majority voting in sliding windows.
+    This helps correct pages that are misclassified but are part of a larger document group.
+    """
+    if len(page_categories) < 3:
+        return page_categories
+    
+    corrected = page_categories.copy()
+    window_size = 5  # Use a 5-page sliding window
+    
+    # For each page, look at surrounding pages to determine most likely category
+    for i in range(len(corrected)):
+        # Skip if confidence is very high (0.9+)
+        if page_results[i]['confidence'] >= 0.9:
+            continue
+        
+        # Calculate window boundaries
+        start = max(0, i - window_size // 2)
+        end = min(len(corrected), i + window_size // 2 + 1)
+        
+        # Count categories in window, weighted by confidence
+        category_scores = {}
+        for j in range(start, end):
+            if j != i:  # Don't count the current page
+                cat = corrected[j]
+                conf = page_results[j]['confidence']
+                category_scores[cat] = category_scores.get(cat, 0) + conf
+        
+        if category_scores:
+            # Find category with highest weighted score
+            best_cat = max(category_scores, key=category_scores.get)
+            best_score = category_scores[best_cat]
+            
+            # Calculate average confidence for best category
+            count = sum(1 for j in range(start, end) 
+                       if j != i and corrected[j] == best_cat)
+            avg_conf = best_score / count if count > 0 else 0
+            
+            # If best category is different and has good support, consider changing
+            if (best_cat != corrected[i] and 
+                avg_conf >= 0.65 and 
+                count >= 2):  # At least 2 pages support this category
+                
+                # Check for conflicting indicators
+                page_text = page_results[i].get('page_text', '')
+                if not has_conflicting_indicators(page_text, best_cat):
+                    # Only change if current confidence is not too high
+                    if page_results[i]['confidence'] < 0.8:
+                        corrected[i] = best_cat
+    
+    # Additional pass: Merge small isolated groups more aggressively
+    # Look for patterns where a single page or small group is different from neighbors
+    for i in range(1, len(corrected) - 1):
+        if (corrected[i] != corrected[i-1] and 
+            corrected[i] != corrected[i+1] and
+            corrected[i-1] == corrected[i+1]):
+            # Single isolated page - merge to neighbor category if confidence is low
+            if page_results[i]['confidence'] < 0.75:
+                page_text = page_results[i].get('page_text', '')
+                if not has_conflicting_indicators(page_text, corrected[i-1]):
+                    corrected[i] = corrected[i-1]
+    
+    return corrected
+
+
+def ensure_preauth_continuation(page_categories, page_results):
+    """
+    Ensure that if pages 1-3 are Pre-Auth form C, page 4 is also Pre-Auth form C
+    unless it has a STRONG Discharge Summary header.
+    This handles the case where page 4 is a continuation of the Pre-Auth form C document.
+    """
+    if len(page_categories) < 4:
+        return page_categories
+    
+    corrected = page_categories.copy()
+    
+    # Check if pages 1-3 (indices 0-2) are all Pre-Auth form C
+    if all(corrected[i] == "Pre-Auth form C" for i in range(3)):
+        # Page 4 (index 3) should be Pre-Auth form C unless it has a STRONG Discharge Summary header
+        page_4_idx = 3
+        page_4_text = page_results[page_4_idx].get('page_text', '')
+        
+        # Check for STRONG Discharge Summary header
+        page_4_header = has_document_header(page_4_text)
+        
+        if page_4_header == "Discharge Summary":
+            # Has clear Discharge Summary header - keep as Discharge Summary
+            pass
+        else:
+            # Check for strong Discharge Summary indicators in header
+            processed_text = preprocess_text_for_header_detection(page_4_text)
+            text_lower = processed_text.lower()
+            header = text_lower[:800]
+            
+            # Strong Discharge Summary indicator
+            strong_discharge = re.search(r'\bdischarge\s*summary\b', header, re.IGNORECASE)
+            
+            # Check for Pre-Auth form C indicators
+            preauth_indicators = [
+                r'\bpre[\s\-]*auth\b',
+                r'\bpre[\s\-]*approval\b',
+                r'\brequest\s*for\s*cashless\s*hospitali[sz]ation\b',
+                r'\bproposed\s*(treatment|date|hospitalization)\b',
+                r'\bestimated\s*(expenses|cost)\b',
+                r'\bauthorized\s*limit\b',
+                r'\bto\s*be\s*filled\s*by\s*insured\b'
+            ]
+            has_preauth = any(re.search(pattern, header, re.IGNORECASE) 
+                            for pattern in preauth_indicators)
+            
+            # If no strong Discharge Summary header, make it Pre-Auth form C
+            if not strong_discharge:
+                # Check if it's a continuation
+                if is_likely_continuation_page(page_4_text, "Pre-Auth form C") or has_preauth:
+                    corrected[page_4_idx] = "Pre-Auth form C"
+                elif page_results[page_4_idx]['confidence'] < 0.75:
+                    # Low confidence - likely continuation
+                    corrected[page_4_idx] = "Pre-Auth form C"
+    
+    return corrected
+
+
+def ensure_claim_form_continuation(page_categories, page_results):
+    """
+    Ensure that if pages 1-4 are Claim Form, page 5 is also Claim Form
+    unless it has a STRONG Discharge Summary header.
+    """
+    if len(page_categories) < 5:
+        return page_categories
+    
+    corrected = page_categories.copy()
+    
+    # Check if pages 1-4 (indices 0-3) are all Claim Form
+    if all(corrected[i] == "Claim Form" for i in range(4)):
+        # Page 5 (index 4) should be Claim Form unless it has a STRONG Discharge Summary header
+        page_5_idx = 4
+        page_5_text = page_results[page_5_idx].get('page_text', '')
+        
+        # Check for STRONG Discharge Summary header
+        page_5_header = has_document_header(page_5_text)
+        
+        if page_5_header == "Discharge Summary":
+            # Has clear Discharge Summary header - keep as Discharge Summary
+            pass
+        else:
+            # Check for strong Discharge Summary indicators in header
+            processed_text = preprocess_text_for_header_detection(page_5_text)
+            text_lower = processed_text.lower()
+            header = text_lower[:800]
+            
+            # Only the strongest indicator
+            strong_discharge = re.search(r'\bdischarge\s*summary\b', header, re.IGNORECASE)
+            
+            # Check for Claim Form indicators
+            claim_indicators = [
+                r'\bclaim\s*form\b',
+                r'\bclaim\s*no[.:]?\b',
+                r'\bpolicy\s*(no|number)\b',
+                r'\breimbursement\b'
+            ]
+            has_claim = any(re.search(pattern, header, re.IGNORECASE) 
+                          for pattern in claim_indicators)
+            
+            # If no strong Discharge Summary header, make it Claim Form
+            if not strong_discharge:
+                # Check if it's a continuation
+                if is_likely_continuation_page(page_5_text, "Claim Form") or has_claim:
+                    corrected[page_5_idx] = "Claim Form"
+                elif page_results[page_5_idx]['confidence'] < 0.75:
+                    # Low confidence - likely continuation
+                    corrected[page_5_idx] = "Claim Form"
+    
+    return corrected
+
+
 def process_file(uploaded_file):
     """Process uploaded file based on its type."""
     file_extension = uploaded_file.name.lower().split('.')[-1]
@@ -1379,10 +2720,16 @@ def main():
 
                 st.subheader("📋 Document Classification Results")
                 
-                # Display grouped results
-                st.markdown("**Page-by-Page Classification:**")
-                for result in grouped_results:
-                    st.write(f"📄 {result}")
+                # Display compact format (expected output format) - PRIMARY OUTPUT
+                compact_output = format_output_compact(page_categories)
+                st.markdown("### **Document Categorization:**")
+                st.info(f"**{compact_output}**")
+                st.markdown("---")
+                
+                # Display detailed grouped results (for debugging/reference)
+                with st.expander("📄 Page-by-Page Classification (Detailed)", expanded=False):
+                    for result in grouped_results:
+                        st.write(f"📄 {result}")
                 
                 # Add debug information if requested
                 with st.expander("🔍 Debug Information (Confidence Scores)"):
